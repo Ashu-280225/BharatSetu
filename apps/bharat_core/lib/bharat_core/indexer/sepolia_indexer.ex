@@ -57,7 +57,7 @@ defmodule BharatCore.Indexer.SepoliaIndexer do
                 case EventParser.parse(raw_log) do
                   {:tokens_burned, event} ->
                     Logger.debug("TokensBurned block=#{event.block_number} transfer=#{event.transfer_id}")
-                    put_in(acc.pending[event.nonce_hash], {event, event.block_number})
+                    put_in(acc.pending[{event.nonce_hash, event.tx_hash}], {event, event.block_number})
                   _ -> acc
                 end
               end)

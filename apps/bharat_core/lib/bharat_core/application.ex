@@ -29,6 +29,9 @@ defmodule BharatCore.Application do
       # Sepolia indexer — polls TokensBurned events for Sepolia→Amoy
       BharatCore.Indexer.SepoliaIndexer,
 
+      # Expires init transfers with no tx hash older than 10 min
+      BharatCore.Bridge.InitTimeoutWorker,
+
       # Bridge supervisor — one TransferServer per in-flight transfer
       {DynamicSupervisor, name: BharatCore.Bridge.Supervisor, strategy: :one_for_one}
     ]

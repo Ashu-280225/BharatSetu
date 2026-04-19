@@ -1,30 +1,21 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useAccount, useSignMessage, useSendTransaction, usePublicClient, useChainId } from "wagmi";
-import { encodeFunctionData } from "viem";
+import { useAccount, useSignMessage, useSendTransaction, usePublicClient, useChainId, useBalance, useSwitchChain } from "wagmi";
+import { encodeFunctionData, formatUnits } from "viem";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { siweLogin, isLoggedIn } from "../../lib/siwe";
-import { createTransfer, confirmLock, getTransfer, Transfer } from "../../lib/api";
+import { createTransfer, confirmLock, getTransfer, getConfig, cancelTransfer, retryTransfer, Transfer, BridgeConfig } from "../../lib/api";
 import { subscribeToTransfer } from "../../lib/socket";
 
-const LOCK_BRIDGE  = "0x5b73C5498c1E3b4dbA84de0F1833c4a029d90519" as const; // Amoy
-const MINT_BRIDGE  = "0x5b73C5498c1E3b4dbA84de0F1833c4a029d90519" as const; // Sepolia (also wCCC token)
-const TCCS_TOKEN   = "0x3CcbD8c7b63363998e63F73E92fF72c5813bE4eB" as const; // tCCS on Amoy
-
-const AMOY_CHAIN_ID    = 80002;
-const SEPOLIA_CHAIN_ID = 11155111;
-
 const ERC20_APPROVE_ABI = [{
-  name: "approve",
-  type: "function",
+  name: "approve", type: "function",
   inputs: [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }],
   outputs: [{ name: "", type: "bool" }],
 }] as const;
 
 const LOCK_BRIDGE_ABI = [{
-  name: "lockTokens",
-  type: "function",
+  name: "lockTokens", type: "function",
   inputs: [
     { name: "token", type: "address" },
     { name: "amount", type: "uint256" },
@@ -34,45 +25,50 @@ const LOCK_BRIDGE_ABI = [{
 }] as const;
 
 const BURN_BRIDGE_ABI = [{
-  name: "burnAndBridge",
-  type: "function",
-  inputs: [
-    { name: "amount", type: "uint256" },
-    { name: "transferId", type: "bytes32" },
-  ],
+  name: "burnAndBridge", type: "function",
+  inputs: [{ name: "amount", type: "uint256" }, { name: "transferId", type: "bytes32" }],
   outputs: [],
 }] as const;
 
 type Direction = "amoy_to_sepolia" | "sepolia_to_amoy";
 type Step = "connect" | "login" | "form" | "pending" | "done" | "error";
 
-const STATE_LABELS: Record<string, string> = {
-  init:      "Awaiting your MetaMask transaction…",
-  locked:    "Lock submitted — waiting for on-chain confirmation…",
-  confirmed: "Confirmed — relayer is processing your transfer…",
-  minted:    "Tokens processed — finalising…",
-  completed: "Transfer complete!",
-  failed:    "Transfer failed.",
-};
+const STEPS_FORWARD = [
+  { key: "init",      label: "Approve & Lock",       desc: "Approve tCCS spend + lock tokens in bridge",          eta: null },
+  { key: "locked",    label: "Awaiting Confirmation", desc: "Waiting for 12 block confirmations on Amoy",         eta: "~4 min" },
+  { key: "confirmed", label: "Relayer Processing",    desc: "Relayer detected lock — minting wCCC on Sepolia",    eta: "~30 sec" },
+  { key: "minted",    label: "Minted",                desc: "wCCC tokens minted on Sepolia",                      eta: null },
+  { key: "completed", label: "Complete",              desc: "Bridge transfer finished",                           eta: null },
+];
 
-const DIRECTION_CONFIG = {
-  amoy_to_sepolia: {
-    label:       "Amoy → Sepolia",
-    fromChain:   "Polygon Amoy",
-    toChain:     "Ethereum Sepolia",
-    chainId:     AMOY_CHAIN_ID,
-    action:      "Lock & Bridge",
-    description: "Lock tCCS on Amoy → receive wCCC on Sepolia",
-  },
-  sepolia_to_amoy: {
-    label:       "Sepolia → Amoy",
-    fromChain:   "Ethereum Sepolia",
-    toChain:     "Polygon Amoy",
-    chainId:     SEPOLIA_CHAIN_ID,
-    action:      "Burn & Bridge",
-    description: "Burn wCCC on Sepolia → receive tCCS on Amoy",
-  },
-};
+const STEPS_REVERSE = [
+  { key: "init",      label: "Burn & Bridge",         desc: "Burn wCCC on Sepolia — no approval needed",          eta: null },
+  { key: "locked",    label: "Awaiting Confirmation", desc: "Waiting for 3 block confirmations on Sepolia",       eta: "~45 sec" },
+  { key: "confirmed", label: "Relayer Processing",    desc: "Relayer detected burn — unlocking tCCS on Amoy",    eta: "~30 sec" },
+  { key: "minted",    label: "Tokens Released",       desc: "tCCS tokens released on Amoy",                      eta: null },
+  { key: "completed", label: "Complete",              desc: "Bridge transfer finished",                           eta: null },
+];
+
+const STATE_ORDER = ["init", "locked", "confirmed", "minted", "completed"];
+
+function stepStatus(stepKey: string, currentState: string): "done" | "active" | "inactive" {
+  const si = STATE_ORDER.indexOf(stepKey);
+  const ci = STATE_ORDER.indexOf(currentState);
+  if (ci === -1 || currentState === "failed") return si === 0 ? "active" : "inactive";
+  if (si < ci) return "done";
+  if (si === ci) return "active";
+  return "inactive";
+}
+
+function truncate(addr: string) {
+  return addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : "";
+}
+
+function chainInfo(id: number) {
+  if (id === 80002)    return { name: "Polygon Amoy",     cls: "amoy",    symbol: "POL" };
+  if (id === 11155111) return { name: "Ethereum Sepolia", cls: "sepolia", symbol: "ETH" };
+  return { name: `Chain ${id}`, cls: "unknown", symbol: "?" };
+}
 
 export default function BridgePage() {
   const { address, isConnected } = useAccount();
@@ -80,47 +76,79 @@ export default function BridgePage() {
   const { sendTransactionAsync } = useSendTransaction();
   const publicClient = usePublicClient();
   const chainId = useChainId();
+  const { switchChain } = useSwitchChain();
 
-  const [step, setStep] = useState<Step>("connect");
+  const [step, setStep]         = useState<Step>("connect");
   const [direction, setDirection] = useState<Direction>("amoy_to_sepolia");
-  const [amount, setAmount] = useState("");
+  const [amount, setAmount]     = useState("");
   const [transferId, setTransferId] = useState<string | null>(null);
   const [transfer, setTransfer] = useState<Transfer | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [config, setConfig]     = useState<BridgeConfig | null>(null);
+  const [error, setError]       = useState<string | null>(null);
+  const [errorContext, setErrorContext] = useState<"login" | "tx">("tx");
+  const [submitting, setSubmitting] = useState(false);
+  const [copied, setCopied]     = useState(false);
 
-  const dirConfig = DIRECTION_CONFIG[direction];
-  const onWrongChain = step === "form" && chainId !== dirConfig.chainId;
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      getConfig()
+        .then(({ data }) => { if (!cancelled) setConfig(data); })
+        .catch(() => { if (!cancelled) setTimeout(load, 3000); }); // retry every 3s if Phoenix not ready
+    };
+    load();
+    return () => { cancelled = true; };
+  }, []);
 
-  // Restore step on page load
+  const expectedChain = direction === "amoy_to_sepolia"
+    ? (config?.amoy_chain_id ?? 80002)
+    : (config?.sepolia_chain_id ?? 11155111);
+
+  const onWrongChain = step === "form" && !!config && chainId !== expectedChain;
+
+  const tokenAddress = config
+    ? (direction === "amoy_to_sepolia" ? config.tccs_token : config.mint_bridge) as `0x${string}`
+    : undefined;
+
+  const { data: balanceData } = useBalance({
+    address: address,
+    token: tokenAddress,
+    query: { enabled: !!address && !!tokenAddress && !onWrongChain },
+  });
+
+  const balanceFormatted = balanceData
+    ? parseFloat(formatUnits(balanceData.value, balanceData.decimals)).toFixed(4)
+    : null;
+
+  const amountNum = parseFloat(amount) || 0;
+  const insufficientBalance = !!balanceData && amountNum > 0
+    && amountNum > parseFloat(formatUnits(balanceData.value, balanceData.decimals));
+  const chain = chainInfo(chainId);
+  const steps = direction === "amoy_to_sepolia" ? STEPS_FORWARD : STEPS_REVERSE;
+
+  // Restore in-progress transfer
   useEffect(() => {
     if (!isConnected) { setStep("connect"); return; }
     if (!isLoggedIn()) { setStep("login"); return; }
-
     const savedId = localStorage.getItem("activeTransferId");
     if (savedId) {
       getTransfer(savedId).then(({ data: t }) => {
         setTransferId(savedId);
         setTransfer(t);
-        if (t.state === "completed" || t.state === "failed") {
-          setStep("done");
-          localStorage.removeItem("activeTransferId");
-        } else {
-          setStep("pending");
-        }
-      }).catch(() => {
-        localStorage.removeItem("activeTransferId");
-        setStep("form");
-      });
+        setDirection(t.direction as Direction);
+        setStep(t.state === "completed" || t.state === "failed" ? "done" : "pending");
+        if (t.state === "completed" || t.state === "failed") localStorage.removeItem("activeTransferId");
+      }).catch(() => { localStorage.removeItem("activeTransferId"); setStep("form"); });
     } else {
       setStep("form");
     }
   }, [isConnected]);
 
-  // Real-time updates
+  // Real-time WebSocket updates
   useEffect(() => {
     if (!transferId) return;
     const token = localStorage.getItem("jwt") ?? "";
-    const unsubscribe = subscribeToTransfer(transferId, token, (event) => {
+    return subscribeToTransfer(transferId, token, (event) => {
       const state = (event as { state?: string }).state;
       if (state) {
         setTransfer((prev) => prev ? { ...prev, state: state as Transfer["state"] } : null);
@@ -130,7 +158,6 @@ export default function BridgePage() {
         }
       }
     });
-    return unsubscribe;
   }, [transferId]);
 
   const handleLogin = async () => {
@@ -139,212 +166,447 @@ export default function BridgePage() {
       await siweLogin(address, (msg) => signMessageAsync({ account: address, message: msg }));
       setStep("form");
     } catch (e) {
-      setError((e as Error).message);
+      const msg = (e as Error).message;
+      setErrorContext("login");
+      setError(msg === "Failed to fetch" ? "Cannot reach the backend server. Make sure it is running." : msg);
       setStep("error");
     }
   };
 
   const handleSubmit = async () => {
+    if (!config) return;
+    setSubmitting(true);
     setError(null);
-    const log = (s: string, d?: unknown) =>
-      console.log(`[Bridge] ${s}` + (d !== undefined ? `: ${JSON.stringify(d)}` : ""));
+    const log = (s: string, d?: unknown) => console.log(`[Bridge] ${s}`, d ?? "");
+    const { lock_bridge, mint_bridge, tccs_token } = config;
 
     try {
-      // Both directions use TCCS_TOKEN — for amoy_to_sepolia it's what gets locked,
-      // for sepolia_to_amoy it's what the relayer unlocks on Amoy via LockBridge.unlock()
-      const tokenAddress = TCCS_TOKEN;
-
-      log("1 createTransfer", { token: tokenAddress, amount, direction });
-      const { data } = await createTransfer(tokenAddress, amount, direction);
-      log("1 createTransfer OK", { id: data.id, state: data.state });
+      const { data } = await createTransfer(tccs_token, amount, direction);
+      log("created", data.id);
       setTransferId(data.id);
       localStorage.setItem("activeTransferId", data.id);
+      setTransfer({ id: data.id, state: "init", direction, wallet: address!, token_address: tccs_token, amount, nonce_hash: "", lock_tx_hash: null, mint_tx_hash: null, inserted_at: "" });
       setStep("pending");
 
       const amountWei = BigInt(amount) * BigInt(10 ** 18);
       const transferIdBytes = `0x${data.id.replace(/-/g, "").padEnd(64, "0")}` as `0x${string}`;
-      log("transferIdBytes", transferIdBytes);
 
       if (direction === "amoy_to_sepolia") {
-        const amoyFees = {
-          gas: BigInt(120000),
-          maxFeePerGas: BigInt(50_000_000_000),
-          maxPriorityFeePerGas: BigInt(30_000_000_000),
-        };
-
-        log("2 approve — waiting MetaMask");
+        const fees = { gas: BigInt(120000), maxFeePerGas: BigInt(50_000_000_000), maxPriorityFeePerGas: BigInt(30_000_000_000) };
         const approveTx = await sendTransactionAsync({
-          to: TCCS_TOKEN,
-          data: encodeFunctionData({ abi: ERC20_APPROVE_ABI, functionName: "approve", args: [LOCK_BRIDGE, amountWei] }),
-          ...amoyFees,
+          to: tccs_token as `0x${string}`,
+          data: encodeFunctionData({ abi: ERC20_APPROVE_ABI, functionName: "approve", args: [lock_bridge as `0x${string}`, amountWei] }),
+          ...fees,
         });
-        log("2 approve submitted", { tx: approveTx });
         await publicClient!.waitForTransactionReceipt({ hash: approveTx });
-        log("2 approve mined");
 
-        log("3 lockTokens — waiting MetaMask");
         const txHash = await sendTransactionAsync({
-          to: LOCK_BRIDGE,
-          data: encodeFunctionData({ abi: LOCK_BRIDGE_ABI, functionName: "lockTokens", args: [TCCS_TOKEN, amountWei, transferIdBytes] }),
-          ...amoyFees,
+          to: lock_bridge as `0x${string}`,
+          data: encodeFunctionData({ abi: LOCK_BRIDGE_ABI, functionName: "lockTokens", args: [tccs_token as `0x${string}`, amountWei, transferIdBytes] }),
+          ...fees,
         });
-        log("3 lockTokens submitted", { tx: txHash });
         await publicClient!.waitForTransactionReceipt({ hash: txHash });
-        log("3 lockTokens mined");
-
-        log("4 confirmLock", { id: data.id, tx: txHash });
+        setTransfer((prev) => prev ? { ...prev, lock_tx_hash: txHash } : null);
         await confirmLock(data.id, txHash);
-        log("4 confirmLock OK");
-
       } else {
-        // sepolia_to_amoy: burn wCCC on Sepolia
-        const sepoliaFees = {
-          gas: BigInt(100000),
-          maxFeePerGas: BigInt(20_000_000_000),
-          maxPriorityFeePerGas: BigInt(2_000_000_000),
-        };
-
-        log("2 burnAndBridge — waiting MetaMask");
+        const fees = { gas: BigInt(80000), maxFeePerGas: BigInt(5_000_000_000), maxPriorityFeePerGas: BigInt(1_000_000_000) };
         const txHash = await sendTransactionAsync({
-          to: MINT_BRIDGE,
+          to: mint_bridge as `0x${string}`,
           data: encodeFunctionData({ abi: BURN_BRIDGE_ABI, functionName: "burnAndBridge", args: [amountWei, transferIdBytes] }),
-          ...sepoliaFees,
+          ...fees,
         });
-        log("2 burnAndBridge submitted", { tx: txHash });
         await publicClient!.waitForTransactionReceipt({ hash: txHash });
-        log("2 burnAndBridge mined");
-
-        log("3 confirmLock (burn confirmed)", { id: data.id, tx: txHash });
+        setTransfer((prev) => prev ? { ...prev, lock_tx_hash: txHash } : null);
         await confirmLock(data.id, txHash);
-        log("3 confirmLock OK");
       }
 
       const { data: t } = await getTransfer(data.id);
-      log("getTransfer OK", { state: t.state });
       setTransfer(t);
     } catch (e) {
       console.error("[Bridge] ERROR", e);
+      setErrorContext("tx");
       setError((e as Error).message);
       setStep("error");
+    } finally {
+      setSubmitting(false);
     }
+  };
+
+  const reset = () => {
+    localStorage.removeItem("activeTransferId");
+    setStep("form"); setTransfer(null); setTransferId(null); setAmount(""); setError(null);
+    // direction preserved intentionally — user likely wants to bridge back
+  };
+
+  const handleCancel = async () => {
+    if (!transferId) return;
+    try {
+      await cancelTransfer(transferId);
+      reset();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const handleRetry = async () => {
+    if (!transferId) return;
+    try {
+      await retryTransfer(transferId);
+      setTransfer((prev) => prev ? { ...prev, state: "confirmed", failure_reason: null } : null);
+      setStep("pending");
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const explorerBase = (dir: Direction, type: "lock" | "mint") => {
+    if (type === "lock") return dir === "amoy_to_sepolia" ? "https://amoy.polygonscan.com/tx/" : "https://sepolia.etherscan.io/tx/";
+    return dir === "amoy_to_sepolia" ? "https://sepolia.etherscan.io/tx/" : "https://amoy.polygonscan.com/tx/";
   };
 
   return (
     <div className="page">
-      <h1>Bridge Carbon Credits</h1>
+      <div className="page-title">Cross-Chain Bridge</div>
+      <div className="page-subtitle">Move carbon credits across blockchains, trustlessly</div>
 
+      {/* ── Step 1: Connect ── */}
       {step === "connect" && (
-        <section className="card">
-          <h2>Step 1 — Connect Wallet</h2>
-          <ConnectButton />
-        </section>
-      )}
-
-      {step === "login" && (
-        <section className="card">
-          <h2>Step 2 — Sign In</h2>
-          <p>Sign a message with MetaMask to authenticate.</p>
-          <button onClick={handleLogin}>Sign In with Ethereum</button>
-        </section>
-      )}
-
-      {step === "form" && (
-        <section className="card">
-          <h2>Step 3 — Bridge Tokens</h2>
-
-          <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
-            {(["amoy_to_sepolia", "sepolia_to_amoy"] as Direction[]).map((d) => (
-              <button
-                key={d}
-                onClick={() => setDirection(d)}
-                style={{
-                  flex: 1,
-                  padding: "8px",
-                  fontWeight: direction === d ? "bold" : "normal",
-                  border: direction === d ? "2px solid #0070f3" : "1px solid #ccc",
-                  borderRadius: "6px",
-                  cursor: "pointer",
-                  background: direction === d ? "#e8f0fe" : "transparent",
-                }}
-              >
-                {DIRECTION_CONFIG[d].label}
-              </button>
-            ))}
+        <div className="card">
+          <div className="card-title">
+            <span style={{ color: "var(--primary)" }}>01</span> Connect Wallet
           </div>
+          <p className="text-muted text-sm" style={{ marginBottom: "1.25rem" }}>
+            Connect your MetaMask or WalletConnect wallet to get started.
+          </p>
+          <ConnectButton />
+        </div>
+      )}
 
-          <p style={{ color: "#666", fontSize: "14px", marginBottom: "12px" }}>
-            {dirConfig.description}
+      {/* ── Step 2: Login ── */}
+      {step === "login" && (
+        <div className="card" style={{ textAlign: "center" }}>
+          <div style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>🔐</div>
+          <div className="card-title" style={{ justifyContent: "center" }}>Authenticate</div>
+          <p className="text-muted text-sm" style={{ marginBottom: "1.5rem" }}>
+            Sign a free off-chain message to prove wallet ownership.<br />No gas, no transaction.
           </p>
 
+          <div style={{
+            display: "inline-flex", alignItems: "center", gap: "0.6rem",
+            background: "var(--surface2)", border: "1px solid var(--border)",
+            borderRadius: 10, padding: "0.6rem 1rem", marginBottom: "1.5rem",
+          }}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--primary)", display: "inline-block" }} />
+            <span style={{ fontFamily: "monospace", fontSize: "0.88rem" }}>{truncate(address ?? "")}</span>
+          </div>
+
+          <div>
+            <button className="btn-primary" style={{ width: "100%" }} onClick={handleLogin}>
+              Sign with Ethereum
+            </button>
+            <p style={{ fontSize: "0.72rem", color: "var(--muted)", marginTop: "0.75rem" }}>
+              EIP-4361 · SIWE standard · read-only signature
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Step 3: Form ── */}
+      {step === "form" && (
+        <div className="card">
+          <div className="card-title">
+            <span style={{ color: "var(--primary)" }}>03</span> Bridge Tokens
+          </div>
+
+          {/* Wallet status */}
+          <div className="wallet-bar">
+            <div className="wallet-address">{truncate(address ?? "")}</div>
+            <div className={`chain-badge ${chain.cls}`}>
+              <span className="chain-dot" />
+              {chain.name}
+            </div>
+            <span className="text-muted text-sm" style={{ marginLeft: "auto", fontSize: "0.75rem" }}>
+              {isLoggedIn() ? <span style={{ color: "var(--primary)" }}>● Authenticated</span> : "Not signed in"}
+            </span>
+          </div>
+
+          {/* Direction toggle */}
+          <div className="direction-toggle">
+            <div className={`chain-box ${direction === "amoy_to_sepolia" ? "active" : ""}`}
+              onClick={() => setDirection("amoy_to_sepolia")}>
+              <div className="chain-name" style={{ color: direction === "amoy_to_sepolia" ? "var(--primary)" : "var(--text)" }}>
+                Polygon Amoy
+              </div>
+              <div className="chain-label">
+                tCCS · {direction === "amoy_to_sepolia" ? "Source" : "Destination"}
+              </div>
+            </div>
+            <button className="swap-btn" onClick={() => setDirection(d => d === "amoy_to_sepolia" ? "sepolia_to_amoy" : "amoy_to_sepolia")}>
+              ⇄
+            </button>
+            <div className={`chain-box ${direction === "sepolia_to_amoy" ? "active" : ""}`}
+              onClick={() => setDirection("sepolia_to_amoy")}>
+              <div className="chain-name" style={{ color: direction === "sepolia_to_amoy" ? "var(--primary)" : "var(--text)" }}>
+                Ethereum Sepolia
+              </div>
+              <div className="chain-label">
+                wCCC · {direction === "sepolia_to_amoy" ? "Source" : "Destination"}
+              </div>
+            </div>
+          </div>
+
+          {/* Wrong chain warning + auto-switch */}
           {onWrongChain && (
-            <div style={{ background: "#fff3cd", border: "1px solid #ffc107", borderRadius: "6px", padding: "10px", marginBottom: "12px", color: "#856404" }}>
-              ⚠️ Switch MetaMask to <strong>{dirConfig.fromChain}</strong> (chain ID {dirConfig.chainId}) to continue.
+            <div className="warning-banner" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span>⚠ Switch to <strong>{direction === "amoy_to_sepolia" ? "Polygon Amoy" : "Ethereum Sepolia"}</strong></span>
+              <button
+                className="btn-secondary"
+                style={{ padding: "0.3rem 0.9rem", fontSize: "0.8rem" }}
+                onClick={() => switchChain({ chainId: expectedChain })}
+              >
+                Switch Network
+              </button>
             </div>
           )}
 
-          <label>Amount</label>
-          <input
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            placeholder="100"
-            type="number"
-          />
-          <button onClick={handleSubmit} disabled={!amount || onWrongChain}>
-            {dirConfig.action}
+          {/* Amount */}
+          <div className="amount-wrap">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div className="amount-label">Amount to bridge</div>
+              {balanceFormatted !== null && (
+                <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>
+                  Balance: <span style={{ color: "var(--text)" }}>{balanceFormatted}</span>
+                  {" "}
+                  <button
+                    className="btn-secondary"
+                    style={{ padding: "0.1rem 0.5rem", fontSize: "0.7rem", marginLeft: 4 }}
+                    onClick={() => setAmount(formatUnits(balanceData!.value, balanceData!.decimals))}
+                  >
+                    Max
+                  </button>
+                </div>
+              )}
+            </div>
+            <input
+              className={`amount-input${insufficientBalance ? " input-error" : ""}`}
+              type="number"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="0"
+            />
+            <span className="amount-token">
+              {direction === "amoy_to_sepolia" ? "tCCS" : "wCCC"}
+            </span>
+          </div>
+          {insufficientBalance && (
+            <div style={{ color: "var(--red)", fontSize: "0.78rem", marginTop: "-0.75rem", marginBottom: "0.75rem" }}>
+              Insufficient balance
+            </div>
+          )}
+
+          {/* Contract info */}
+          {config && (
+            <div style={{ marginBottom: "1.25rem" }}>
+              <div className="amount-label">Contract Details</div>
+              <div className="contract-row">
+                <span className="contract-label">{direction === "amoy_to_sepolia" ? "LockBridge (Amoy)" : "MintBridge (Sepolia)"}</span>
+                <span className="contract-addr">{truncate(direction === "amoy_to_sepolia" ? config.lock_bridge : config.mint_bridge)}</span>
+              </div>
+              <div className="contract-row">
+                <span className="contract-label">{direction === "amoy_to_sepolia" ? "tCCS Token (Amoy)" : "wCCC Token (Sepolia)"}</span>
+                <span className="contract-addr">{truncate(direction === "amoy_to_sepolia" ? config.tccs_token : config.mint_bridge)}</span>
+              </div>
+              <div className="contract-row">
+                <span className="contract-label">Steps</span>
+                <span className="contract-addr" style={{ color: "var(--muted)" }}>
+                  {direction === "amoy_to_sepolia" ? "Approve → Lock → Mint" : "Burn → Unlock (no approve)"}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {!config && <p className="text-muted text-sm" style={{ marginBottom: "1rem" }}>Loading config…</p>}
+
+          <button
+            className="btn-primary"
+            onClick={handleSubmit}
+            disabled={!amount || !config || onWrongChain || insufficientBalance || submitting}
+          >
+            {submitting
+              ? <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+                  <span className="spinner" /> Processing…
+                </span>
+              : direction === "amoy_to_sepolia" ? "Lock & Bridge →" : "Burn & Bridge →"
+            }
           </button>
-        </section>
+        </div>
       )}
 
+      {/* ── Pending ── */}
       {step === "pending" && transfer && (
-        <section className="card">
-          <h2>Transfer in Progress</h2>
-          <p><strong>ID:</strong> {transfer.id}</p>
-          <p><strong>Status:</strong> {STATE_LABELS[transfer.state] ?? transfer.state}</p>
+        <div className="card">
+          <div className="card-title">
+            <span className="spinner" style={{ width: 18, height: 18 }} />
+            Transfer in Progress
+          </div>
+
+          <div style={{ marginBottom: "1.5rem" }}>
+            <div className="progress-bar">
+              <div className="progress-fill" style={{ width: `${stateProgress(transfer.state)}%` }} />
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: "0.72rem", color: "var(--muted)" }}>
+              <span>Init</span><span>Locked</span><span>Confirmed</span><span>Minted</span><span>Done</span>
+            </div>
+          </div>
+
+          <div className="stepper">
+            {steps.map((s) => {
+              const status = transfer.state === "failed" && s.key === "init"
+                ? "active"
+                : stepStatus(s.key, transfer.state);
+              return (
+                <div key={s.key} className={`step-item ${status}`}>
+                  <div className="step-icon">
+                    {status === "done" ? "✓" : status === "active" ? "●" : "○"}
+                  </div>
+                  <div className="step-content">
+                    <div className="step-title">{s.label}</div>
+                    <div className="step-desc">{s.desc}</div>
+                    {status === "active" && s.eta && (
+                      <div style={{ fontSize: "0.72rem", color: "var(--primary)", marginTop: 2 }}>
+                        ETA {s.eta}
+                      </div>
+                    )}
+                    {s.key === "locked" && transfer.lock_tx_hash && (
+                      <a className="step-tx" href={`${explorerBase(transfer.direction as Direction, "lock")}${transfer.lock_tx_hash}`} target="_blank" rel="noreferrer">
+                        {transfer.lock_tx_hash.slice(0, 20)}…{transfer.lock_tx_hash.slice(-8)} ↗
+                      </a>
+                    )}
+                    {s.key === "minted" && transfer.mint_tx_hash && (
+                      <a className="step-tx" href={`${explorerBase(transfer.direction as Direction, "mint")}${transfer.mint_tx_hash}`} target="_blank" rel="noreferrer">
+                        {transfer.mint_tx_hash.slice(0, 20)}…{transfer.mint_tx_hash.slice(-8)} ↗
+                      </a>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="divider" />
+          <div className="contract-row">
+            <span className="contract-label">Transfer ID</span>
+            <span
+              className="contract-addr"
+              style={{ cursor: "pointer" }}
+              title="Click to copy"
+              onClick={() => { navigator.clipboard.writeText(transfer.id); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
+            >
+              {transfer.id} {copied ? <span style={{ color: "var(--primary)", fontSize: "0.7rem" }}>Copied!</span> : <span style={{ color: "var(--muted)", fontSize: "0.7rem" }}>⧉</span>}
+            </span>
+          </div>
+          <div className="contract-row">
+            <span className="contract-label">Amount</span>
+            <span className="contract-addr" style={{ color: "var(--primary)" }}>
+              {transfer.amount} {transfer.direction === "amoy_to_sepolia" ? "tCCS" : "wCCC"}
+            </span>
+          </div>
+
+          {transfer.state === "init" && !transfer.lock_tx_hash && (
+            <div style={{ marginTop: "1.25rem" }}>
+              <button className="btn-secondary" style={{ width: "100%", opacity: 0.7 }} onClick={handleCancel}>
+                Cancel Transfer
+              </button>
+              <p style={{ color: "var(--muted)", fontSize: "0.72rem", textAlign: "center", marginTop: 6 }}>
+                Safe to cancel — no transaction was submitted yet
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Done ── */}
+      {step === "done" && transfer && (
+        <div className={`card ${transfer.state === "completed" ? "success" : "error"}`}>
+          <div className="card-title" style={{ fontSize: "1.3rem" }}>
+            {transfer.state === "completed" ? "🎉 Transfer Complete!" : "❌ Transfer Failed"}
+          </div>
+
+          {transfer.state === "completed" && (
+            <p className="text-sm" style={{ color: "var(--primary)", marginBottom: "1.25rem" }}>
+              {transfer.direction === "amoy_to_sepolia"
+                ? `${transfer.amount} wCCC has been minted to your wallet on Sepolia.`
+                : `${transfer.amount} tCCS has been unlocked to your wallet on Amoy.`}
+            </p>
+          )}
+
+          <div className="contract-row">
+            <span className="contract-label">Transfer ID</span>
+            <span
+              className="contract-addr"
+              style={{ cursor: "pointer" }}
+              title="Click to copy"
+              onClick={() => { navigator.clipboard.writeText(transfer.id); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
+            >
+              {transfer.id} {copied ? <span style={{ color: "var(--primary)", fontSize: "0.7rem" }}>Copied!</span> : <span style={{ color: "var(--muted)", fontSize: "0.7rem" }}>⧉</span>}
+            </span>
+          </div>
           {transfer.lock_tx_hash && (
-            <p><strong>Lock Tx:</strong> {transfer.lock_tx_hash}</p>
+            <div className="contract-row">
+              <span className="contract-label">{transfer.direction === "amoy_to_sepolia" ? "Lock Tx" : "Burn Tx"}</span>
+              <a className="contract-addr" style={{ color: "var(--blue)" }}
+                href={`${explorerBase(transfer.direction as Direction, "lock")}${transfer.lock_tx_hash}`}
+                target="_blank" rel="noreferrer">
+                {truncate(transfer.lock_tx_hash)} ↗
+              </a>
+            </div>
           )}
           {transfer.mint_tx_hash && (
-            <p><strong>Mint Tx:</strong> {transfer.mint_tx_hash}</p>
+            <div className="contract-row">
+              <span className="contract-label">{transfer.direction === "amoy_to_sepolia" ? "Mint Tx" : "Unlock Tx"}</span>
+              <a className="contract-addr" style={{ color: "var(--blue)" }}
+                href={`${explorerBase(transfer.direction as Direction, "mint")}${transfer.mint_tx_hash}`}
+                target="_blank" rel="noreferrer">
+                {truncate(transfer.mint_tx_hash)} ↗
+              </a>
+            </div>
           )}
-          <div className="progress-bar">
-            <div
-              className="progress-fill"
-              style={{ width: `${stateProgress(transfer.state)}%` }}
-            />
+
+          <div style={{ marginTop: "1.25rem", display: "flex", gap: "0.75rem" }}>
+            {transfer.state === "failed" && transfer.failure_reason?.includes("relay") && (
+              <button className="btn-primary" style={{ flex: 1 }} onClick={handleRetry}>
+                Retry Relay
+              </button>
+            )}
+            <button className="btn-secondary" style={{ flex: 1 }} onClick={reset}>New Transfer</button>
           </div>
-        </section>
+        </div>
       )}
 
-      {step === "done" && transfer && (
-        <section className="card success">
-          <h2>{transfer.state === "completed" ? "🎉 Transfer Complete!" : "❌ Transfer Failed"}</h2>
-          <p>Transfer ID: {transfer.id}</p>
-          {transfer.mint_tx_hash && <p>Mint Tx: {transfer.mint_tx_hash}</p>}
-          <button onClick={() => {
-            localStorage.removeItem("activeTransferId");
-            setStep("form");
-            setTransfer(null);
-            setTransferId(null);
-          }}>
-            New Transfer
-          </button>
-        </section>
-      )}
-
+      {/* ── Error ── */}
       {step === "error" && (
-        <section className="card error">
-          <h2>Error</h2>
-          <p>{error}</p>
-          <button onClick={() => setStep(isLoggedIn() ? "form" : "login")}>Retry</button>
-        </section>
+        <div className="card error">
+          <div className="card-title">
+            {errorContext === "login" ? "Sign-In Failed" : "Transaction Failed"}
+          </div>
+          <p className="text-sm mono" style={{ color: "var(--red)", marginBottom: "0.5rem", wordBreak: "break-word" }}>
+            {error}
+          </p>
+          {errorContext === "login" && (
+            <p style={{ fontSize: "0.78rem", color: "var(--muted)", marginBottom: "1.25rem" }}>
+              Make sure the BharatSetu backend is running (<code>./dev.sh</code>), then try again.
+            </p>
+          )}
+          {errorContext === "tx" && <div style={{ marginBottom: "1.25rem" }} />}
+          <button className="btn-secondary" onClick={() => setStep(isLoggedIn() ? "form" : "login")}>
+            Try Again
+          </button>
+        </div>
       )}
     </div>
   );
 }
 
 function stateProgress(state: string): number {
-  const map: Record<string, number> = {
-    init: 20, locked: 40, confirmed: 60, minted: 80, completed: 100, failed: 100,
-  };
-  return map[state] ?? 0;
+  return ({ init: 10, locked: 35, confirmed: 60, minted: 85, completed: 100, failed: 100 })[state] ?? 0;
 }

@@ -33,6 +33,7 @@ defmodule BharatWeb.Router do
     post "/auth/verify",    AuthController, :verify
     get  "/prices",         PriceController, :index
     get  "/health",         HealthController, :index
+    get  "/config",         ConfigController, :index
   end
 
   # Authenticated — read-only
@@ -47,8 +48,10 @@ defmodule BharatWeb.Router do
   scope "/api/v1", BharatWeb do
     pipe_through [:api, :authenticated, :kyc_verified]
 
-    post "/transfers",           TransferController, :create
-    post "/transfers/:id/lock",  TransferController, :confirm_lock
+    post   "/transfers",              TransferController, :create
+    post   "/transfers/:id/lock",    TransferController, :confirm_lock
+    delete "/transfers/:id",         TransferController, :cancel
+    post   "/transfers/:id/retry",   TransferController, :retry
   end
 
   # LiveView dashboard

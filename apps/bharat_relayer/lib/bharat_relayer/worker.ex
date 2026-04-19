@@ -24,6 +24,7 @@ defmodule BharatRelayer.Worker do
 
   @poll_interval_ms 5_000
   @max_relay_attempts 3
+  @wei_per_token Decimal.new("1000000000000000000")
 
   def start_link(_), do: GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
 
@@ -64,7 +65,7 @@ defmodule BharatRelayer.Worker do
   defp attempt_mint(transfer) do
     Logger.info("Relayer: processing transfer #{transfer.id} direction=#{transfer.direction} (attempt #{transfer.relay_attempts + 1})")
 
-    amount_wei = Decimal.mult(transfer.amount, Decimal.new("1000000000000000000"))
+    amount_wei = Decimal.mult(transfer.amount, @wei_per_token)
 
     result =
       case transfer.direction do

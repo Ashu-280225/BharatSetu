@@ -85,7 +85,9 @@ contract MintBridge is ERC20, Ownable {
      */
     function burnAndBridge(uint256 amount, bytes32 transferId) external whenNotPaused {
         if (amount == 0) revert ZeroAmount();
+        if (usedNonces[transferId]) revert NonceAlreadyUsed(transferId);
 
+        usedNonces[transferId] = true;
         bytes32 nonceHash = keccak256(abi.encodePacked(msg.sender, transferId));
         _burn(msg.sender, amount);
         emit TokensBurned(msg.sender, amount, nonceHash, transferId);

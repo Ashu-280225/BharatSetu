@@ -12,9 +12,15 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <Providers>
           <nav className="navbar">
-            <span className="brand">🌿 BharatSetu</span>
-            <a href="/dashboard">Dashboard</a>
-            <a href="/bridge">Bridge</a>
+            <span className="brand">
+              <span className="brand-dot" />
+              BharatSetu
+            </span>
+            <div className="nav-links">
+              <a href="/dashboard" className="nav-link">Dashboard</a>
+              <a href="/bridge" className="nav-link">Bridge</a>
+              <a href="/history" className="nav-link">History</a>
+            </div>
           </nav>
           <main>{children}</main>
         </Providers>

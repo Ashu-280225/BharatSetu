@@ -46,6 +46,7 @@ contract LockBridge is Ownable {
     error ZeroAmount();
     error ZeroAddress();
     error NotRelayer(address caller);
+    error TransferFailed();
 
     // ── Modifiers ────────────────────────────────────────────────────────────
 
@@ -72,7 +73,7 @@ contract LockBridge is Ownable {
 
         usedTransferIds[transferId] = true;
         bytes32 nonceHash = keccak256(abi.encodePacked(msg.sender, transferId));
-        IERC20(token).transferFrom(msg.sender, address(this), amount);
+        if (!IERC20(token).transferFrom(msg.sender, address(this), amount)) revert TransferFailed();
         emit TokensLocked(msg.sender, token, amount, nonceHash, transferId);
     }
 
@@ -92,7 +93,7 @@ contract LockBridge is Ownable {
 
         usedTransferIds[transferId] = true;
         bytes32 nonceHash = keccak256(abi.encodePacked(to, transferId));
-        IERC20(token).transfer(to, amount);
+        if (!IERC20(token).transfer(to, amount)) revert TransferFailed();
         emit TokensUnlocked(to, token, amount, nonceHash, transferId);
     }
 
@@ -115,7 +116,7 @@ contract LockBridge is Ownable {
     }
 
     function withdraw(address token, address to, uint256 amount) external onlyOwner {
-        IERC20(token).transfer(to, amount);
+        if (!IERC20(token).transfer(to, amount)) revert TransferFailed();
         emit Withdrawn(token, to, amount);
     }
 }

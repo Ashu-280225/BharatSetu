@@ -218,7 +218,7 @@ defmodule BharatAdapters.Blockchain.Contract do
   end
 
   defp rpc(url, method, params) do
-    body = Jason.encode!(%{jsonrpc: "2.0", id: 1, method: method, params: params})
+    body = Jason.encode!(%{jsonrpc: "2.0", id: :erlang.unique_integer([:positive]), method: method, params: params})
 
     case Req.post(url, body: body, headers: [{"content-type", "application/json"}]) do
       {:ok, %{body: %{"result" => result}}} ->
@@ -275,8 +275,8 @@ defmodule BharatAdapters.Blockchain.Contract do
   # integer → minimal big-endian binary (for RLP)
   defp encode_int(0), do: <<>>
   defp encode_int(n) when n > 0 do
-    byte_size_needed = ceil(:math.log2(n + 1) / 8)
-    <<n::big-unsigned-integer-size(byte_size_needed)-unit(8)>>
+    bin = :binary.encode_unsigned(n)
+    bin
   end
 
   defp decode_hex("0x" <> hex), do: Base.decode16!(hex, case: :mixed)

@@ -78,18 +78,57 @@ defmodule BharatWeb.TransferController do
     end
   end
 
+  def cancel(conn, %{"id" => id}) do
+    wallet = conn.assigns.wallet
+
+    case Transfers.get(id, wallet) do
+      nil ->
+        conn |> put_status(:not_found) |> json(%{error: "not found"})
+
+      %{state: "init", lock_tx_hash: nil} ->
+        Transfers.update_state(id, "failed", %{failure_reason: "cancelled by user"})
+        json(conn, %{data: %{id: id, state: "failed"}})
+
+      _ ->
+        conn |> put_status(:conflict) |> json(%{error: "transfer cannot be cancelled after submission"})
+    end
+  end
+
+  def retry(conn, %{"id" => id}) do
+    wallet = conn.assigns.wallet
+
+    case Transfers.get(id, wallet) do
+      nil ->
+        conn |> put_status(:not_found) |> json(%{error: "not found"})
+
+      %{state: "failed", failure_reason: reason} when not is_nil(reason) ->
+        if String.contains?(reason, "relay") do
+          case Transfers.reset_for_retry(id) do
+            {:ok, :reset} -> json(conn, %{data: %{id: id, state: "confirmed"}})
+            {:error, _}   -> conn |> put_status(:unprocessable_entity) |> json(%{error: "reset failed"})
+          end
+        else
+          conn |> put_status(:conflict) |> json(%{error: "only relay failures can be retried"})
+        end
+
+      _ ->
+        conn |> put_status(:conflict) |> json(%{error: "transfer is not in a retryable state"})
+    end
+  end
+
   defp serialize(%Transfer{} = t) do
     %{
-      id:            t.id,
-      wallet:        t.wallet,
-      token_address: t.token_address,
-      amount:        t.amount,
-      nonce_hash:    t.nonce_hash,
-      state:         t.state,
-      direction:     t.direction,
-      lock_tx_hash:  t.lock_tx_hash,
-      mint_tx_hash:  t.mint_tx_hash,
-      inserted_at:   t.inserted_at
+      id:             t.id,
+      wallet:         t.wallet,
+      token_address:  t.token_address,
+      amount:         t.amount,
+      nonce_hash:     t.nonce_hash,
+      state:          t.state,
+      direction:      t.direction,
+      lock_tx_hash:   t.lock_tx_hash,
+      mint_tx_hash:   t.mint_tx_hash,
+      failure_reason: t.failure_reason,
+      inserted_at:    t.inserted_at
     }
   end
 

@@ -106,16 +106,16 @@ defmodule BharatCore.Bridge.TransferServer do
 
   @impl true
   def handle_continue(:init_transfer, s) do
-    unsigned_tx = Contract.build_lock_tx(s.token_address, s.amount, s.id)
+    payload =
+      if s.direction == "amoy_to_sepolia" do
+        unsigned_tx = Contract.build_lock_tx(s.token_address, s.amount, s.id)
+        %{event: "await_lock", transfer_id: s.id, unsigned_tx: unsigned_tx, nonce_hash: s.nonce_hash}
+      else
+        %{event: "await_burn", transfer_id: s.id, nonce_hash: s.nonce_hash}
+      end
 
-    broadcast(s.id, %{
-      event:       "await_lock",
-      transfer_id: s.id,
-      unsigned_tx: unsigned_tx,
-      nonce_hash:  s.nonce_hash
-    })
-
-    Logger.info("Transfer #{s.id} INIT — awaiting MetaMask lock submission")
+    broadcast(s.id, payload)
+    Logger.info("Transfer #{s.id} INIT direction=#{s.direction} — awaiting user tx")
     {:noreply, s}
   end
 

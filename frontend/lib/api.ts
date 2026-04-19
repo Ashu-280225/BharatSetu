@@ -16,6 +16,9 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
 
   if (!res.ok) {
+    if (res.status === 401) {
+      localStorage.removeItem("jwt");
+    }
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error ?? `HTTP ${res.status}`);
   }
@@ -51,6 +54,7 @@ export type Transfer = {
   direction: "amoy_to_sepolia" | "sepolia_to_amoy";
   lock_tx_hash: string | null;
   mint_tx_hash: string | null;
+  failure_reason: string | null;
   inserted_at: string;
 };
 
@@ -76,8 +80,36 @@ export async function listTransfers() {
   return request<{ data: Transfer[] }>("/transfers");
 }
 
+export async function cancelTransfer(id: string) {
+  return request<{ data: { id: string; state: string } }>(
+    `/transfers/${id}`,
+    { method: "DELETE" }
+  );
+}
+
+export async function retryTransfer(id: string) {
+  return request<{ data: { id: string; state: string } }>(
+    `/transfers/${id}/retry`,
+    { method: "POST" }
+  );
+}
+
 // ── Prices ────────────────────────────────────────────────────────────────
 
 export async function getPrices() {
   return request<{ data: Record<string, number | Record<string, number>> }>("/prices");
+}
+
+// ── Config ────────────────────────────────────────────────────────────────
+
+export type BridgeConfig = {
+  lock_bridge: string;
+  mint_bridge: string;
+  tccs_token: string;
+  amoy_chain_id: number;
+  sepolia_chain_id: number;
+};
+
+export async function getConfig() {
+  return request<{ data: BridgeConfig }>("/config");
 }
