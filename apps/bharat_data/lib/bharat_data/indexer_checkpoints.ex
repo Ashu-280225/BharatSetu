@@ -5,6 +5,7 @@ defmodule BharatData.IndexerCheckpoints do
 
   @amoy_id    1
   @sepolia_id 2
+  @anvil_id   3
 
   def get_last_block(chain \\ "amoy") do
     id = chain_id(chain)
@@ -24,4 +25,5 @@ defmodule BharatData.IndexerCheckpoints do
 
   defp chain_id("amoy"),    do: @amoy_id
   defp chain_id("sepolia"), do: @sepolia_id
+  defp chain_id("anvil"),   do: @anvil_id
 end

@@ -13,6 +13,15 @@ defmodule BharatAdapters.Blockchain.Contract do
   # keccak256("TokensBurned(address,uint256,bytes32,bytes32)")
   @tokens_burned_topic "0x76802cff36c98e0fd357b353b62bdf235862d5c71277fcc4827fce74d4d0a487"
 
+  # keccak256("CBDCLocked(address,uint256,bytes32,bytes32,uint8,bytes)") — CBDCVault
+  @cbdc_locked_topic "0x106e28fff448c4af52727f4a2a877a388930773c9c799031b52f7be42d5dbfe8"
+
+  # keccak256("TokensBurned(address,uint256,bytes32)") — StablecoinBridge burn event
+  @stablecoin_burned_topic "0x52916471973ae53f679d702015168c0a34628d9d95a48de6bd2093661e39a7c3"
+
+  # keccak256("AssetLocked(address,address,uint256,bytes32,bytes32,bytes)") — AssetVault
+  @asset_locked_topic "0xfebbc5c036aa2aa6ef382b492327c08033496d19d1286f732900cb5d618a70d4"
+
   # Sepolia chain ID
   @sepolia_chain_id 11_155_111
 
@@ -21,6 +30,9 @@ defmodule BharatAdapters.Blockchain.Contract do
 
   def tokens_locked_topic, do: @tokens_locked_topic
   def tokens_burned_topic, do: @tokens_burned_topic
+  def cbdc_locked_topic, do: @cbdc_locked_topic
+  def stablecoin_burned_topic, do: @stablecoin_burned_topic
+  def asset_locked_topic, do: @asset_locked_topic
 
   # Build lockTokens() calldata for MetaMask (returned to frontend as hex)
   def build_lock_tx(token_address, amount, transfer_id) do
@@ -123,6 +135,103 @@ defmodule BharatAdapters.Blockchain.Contract do
     else
       {:error, reason} ->
         Logger.error("unlock_on_amoy failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  # ── POC v2: Anvil / CBDCVault / StablecoinBridge ─────────────────────────
+
+  # Build lockCBDC() calldata for MetaMask (user calls on Anvil)
+  def build_lock_cbdc_tx(amount, transfer_id) do
+    calldata = encode_call(
+      "lockCBDC(uint256,bytes32)",
+      [uint(amount), bytes32(transfer_id)]
+    )
+    %{
+      to:   cbdc_vault_address(),
+      data: "0x" <> Base.encode16(calldata, case: :lower),
+      gas:  "0x30D40"
+    }
+  end
+
+  # Get current block number from Anvil local node
+  def anvil_block_number do
+    anvil_url = anvil_http_url()
+    case rpc(anvil_url, "eth_blockNumber", []) do
+      {:ok, "0x" <> hex} -> {:ok, String.to_integer(hex, 16)}
+      {:ok, hex}         -> {:ok, String.to_integer(hex, 16)}
+      err                -> err
+    end
+  end
+
+  # Get CBDCLocked + AssetLocked logs from Anvil (both vault contracts).
+  def get_anvil_logs(from_block, to_block) do
+    params = %{
+      fromBlock: "0x" <> Integer.to_string(from_block, 16),
+      toBlock:   "0x" <> Integer.to_string(to_block, 16),
+      address:   [cbdc_vault_address(), asset_vault_address()],
+      topics:    [[@cbdc_locked_topic, @asset_locked_topic]]
+    }
+    rpc(anvil_http_url(), "eth_getLogs", [params])
+  end
+
+  # Submit executeTokenInstruction() on Amoy — Token→Instruction flow.
+  def execute_token_instruction(to_wallet, nonce_hash, payload, signatures) when is_list(signatures) do
+    calldata = encode_call(
+      "executeTokenInstruction(address,bytes32,bytes,bytes[])",
+      encode_token_instruction_args(to_wallet, nonce_hash, payload, signatures)
+    )
+    submit_to_bridge(calldata)
+  end
+
+  # Submit executeAssetInstruction() on Amoy — Asset→Instruction flow.
+  def execute_asset_instruction(to_wallet, token_contract, token_id, nonce_hash, payload, signatures)
+      when is_list(signatures) do
+    calldata = encode_call(
+      "executeAssetInstruction(address,address,uint256,bytes32,bytes,bytes[])",
+      encode_asset_instruction_args(to_wallet, token_contract, token_id, nonce_hash, payload, signatures)
+    )
+    submit_to_bridge(calldata)
+  end
+
+  defp submit_to_bridge(calldata) do
+    relayer_key    = relayer_1_private_key()
+    bridge_address = stablecoin_bridge_address()
+    amoy_url       = amoy_http_url()
+
+    with {:ok, nonce}     <- eth_get_nonce(amoy_url, relayer_address(relayer_key)),
+         {:ok, gas_price} <- eth_gas_price(amoy_url),
+         {:ok, signed}    <- sign_tx_for_chain(relayer_key, bridge_address, calldata, nonce, gas_price, @amoy_chain_id),
+         {:ok, tx_hash}   <- eth_send_raw(amoy_url, signed) do
+      {:ok, tx_hash}
+    else
+      {:error, reason} ->
+        Logger.error("bridge tx failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  # Submit mintWithApprovals() on Amoy — called by HubRouter when 2-of-3 threshold reached.
+  # signatures: list of 65-byte raw ECDSA signatures (r ++ s ++ v).
+  def mint_with_approvals(to_wallet, amount, nonce_hash, signatures) when is_list(signatures) do
+    calldata = encode_call(
+      "mintWithApprovals(address,uint256,bytes32,bytes[])",
+      encode_mint_with_approvals_args(to_wallet, amount, nonce_hash, signatures)
+    )
+
+    relayer_key    = relayer_1_private_key()
+    bridge_address = stablecoin_bridge_address()
+    amoy_url       = amoy_http_url()
+
+    with {:ok, nonce}     <- eth_get_nonce(amoy_url, relayer_address(relayer_key)),
+         {:ok, gas_price} <- eth_gas_price(amoy_url),
+         {:ok, signed}    <- sign_tx_for_chain(relayer_key, bridge_address, calldata, nonce, gas_price, @amoy_chain_id),
+         {:ok, tx_hash}   <- eth_send_raw(amoy_url, signed) do
+      Logger.info("mintWithApprovals submitted on Amoy: #{tx_hash}")
+      {:ok, tx_hash}
+    else
+      {:error, reason} ->
+        Logger.error("mintWithApprovals failed: #{inspect(reason)}")
         {:error, reason}
     end
   end
@@ -282,9 +391,104 @@ defmodule BharatAdapters.Blockchain.Contract do
   defp decode_hex("0x" <> hex), do: Base.decode16!(hex, case: :mixed)
   defp decode_hex(hex),          do: Base.decode16!(hex, case: :mixed)
 
+  # ── ABI encoding for mintWithApprovals(address,uint256,bytes32,bytes[]) ──
+  # bytes[] is a dynamic type: requires offset pointer in head + encoded array in tail.
+  # Layout (all sizes in bytes, from start of args):
+  #   [0..31]    to address
+  #   [32..63]   amount uint256
+  #   [64..95]   nonceHash bytes32
+  #   [96..127]  offset to bytes[] = 128  (4 static head slots × 32)
+  #   [128..]    bytes[] encoding:
+  #                length N, N offset words (relative to head-section start after length),
+  #                then N encoded bytes elements (length + padded data)
+  defp encode_mint_with_approvals_args(to_wallet, amount, nonce_hash, signatures) do
+    static_head = IO.iodata_to_binary([
+      addr(to_wallet),
+      uint(amount),
+      bytes32_hex(nonce_hash),
+      uint(128)  # offset to bytes[] from start of args
+    ])
+
+    dynamic_tail = encode_bytes_array(signatures)
+    static_head <> dynamic_tail
+  end
+
+  # executeTokenInstruction(address to, bytes32 nonceHash, bytes payload, bytes[] signatures)
+  # Static head: to(32) + nonceHash(32) + payloadOffset(32) + sigsOffset(32) = 128 bytes
+  # Dynamic: payload bytes, then signatures bytes[]
+  defp encode_token_instruction_args(to_wallet, nonce_hash, payload, signatures) do
+    payload_bin    = decode_hex_bytes(payload)
+    payload_enc    = encode_bytes_elem(payload_bin)
+    payload_offset = 128  # 4 static slots
+    sigs_offset    = payload_offset + byte_size(payload_enc)
+
+    IO.iodata_to_binary([
+      addr(to_wallet),
+      bytes32_hex(nonce_hash),
+      uint(payload_offset),
+      uint(sigs_offset),
+      payload_enc,
+      encode_bytes_array(signatures)
+    ])
+  end
+
+  # executeAssetInstruction(address to, address tokenContract, uint256 tokenId,
+  #                         bytes32 nonceHash, bytes payload, bytes[] signatures)
+  # Static head: to(32) + tokenContract(32) + tokenId(32) + nonceHash(32) + payloadOffset(32) + sigsOffset(32) = 192 bytes
+  defp encode_asset_instruction_args(to_wallet, token_contract, token_id, nonce_hash, payload, signatures) do
+    payload_bin    = decode_hex_bytes(payload)
+    payload_enc    = encode_bytes_elem(payload_bin)
+    payload_offset = 192  # 6 static slots
+    sigs_offset    = payload_offset + byte_size(payload_enc)
+
+    IO.iodata_to_binary([
+      addr(to_wallet),
+      addr(token_contract),
+      uint(token_id),
+      bytes32_hex(nonce_hash),
+      uint(payload_offset),
+      uint(sigs_offset),
+      payload_enc,
+      encode_bytes_array(signatures)
+    ])
+  end
+
+  defp decode_hex_bytes("0x" <> hex), do: Base.decode16!(hex, case: :mixed)
+  defp decode_hex_bytes(hex), do: Base.decode16!(hex, case: :mixed)
+
+  # Encode a list of binaries as Solidity bytes[] (dynamic array of dynamic elements).
+  defp encode_bytes_array(list) do
+    n = length(list)
+    # Calculate offset for each element relative to the start of the head section
+    # (right after the length word). Head section = N offset words = N * 32 bytes.
+    head_size = n * 32
+    {offsets, elems} =
+      Enum.reduce(list, {[], [], head_size}, fn bin, {offs, elems, current_offset} ->
+        enc = encode_bytes_elem(bin)
+        {offs ++ [uint(current_offset)], elems ++ [enc], current_offset + byte_size(enc)}
+      end)
+      |> (fn {o, e, _} -> {o, e} end).()
+
+    IO.iodata_to_binary([uint(n)] ++ offsets ++ elems)
+  end
+
+  # Encode a single bytes value: ABI uint256 length + right-padded data to 32-byte boundary.
+  defp encode_bytes_elem(bin) do
+    len = byte_size(bin)
+    pad = rem(32 - rem(len, 32), 32)
+    uint(len) <> bin <> :binary.copy(<<0>>, pad)
+  end
+
+  # ── Config accessors ─────────────────────────────────────────────────────
+
   defp relayer_private_key do
     Application.get_env(:bharat_core, :relayer_private_key) ||
       raise "relayer_private_key not configured"
+  end
+
+  defp relayer_1_private_key do
+    Application.get_env(:bharat_core, :relayer_1_private_key) ||
+      relayer_private_key()
   end
 
   defp lock_contract_address do
@@ -295,5 +499,30 @@ defmodule BharatAdapters.Blockchain.Contract do
   defp mint_contract_address do
     Application.get_env(:bharat_core, :mint_contract) ||
       raise "mint_contract not configured"
+  end
+
+  defp cbdc_vault_address do
+    Application.get_env(:bharat_core, :cbdc_vault_contract) ||
+      raise "cbdc_vault_contract not configured"
+  end
+
+  defp asset_vault_address do
+    Application.get_env(:bharat_core, :asset_vault_contract) ||
+      raise "asset_vault_contract not configured"
+  end
+
+  defp stablecoin_bridge_address do
+    Application.get_env(:bharat_core, :stablecoin_bridge_contract) ||
+      raise "stablecoin_bridge_contract not configured"
+  end
+
+  defp anvil_http_url do
+    Application.get_env(:bharat_core, :anvil_http_url) ||
+      raise "anvil_http_url not configured"
+  end
+
+  defp amoy_http_url do
+    Application.get_env(:bharat_core, :polygon_http_url) ||
+      raise "polygon_http_url not configured"
   end
 end

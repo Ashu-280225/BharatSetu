@@ -7,14 +7,24 @@ defmodule BharatCore.Bridge.TransferSupervisor do
   def start_transfer(attrs) do
     id = Ecto.UUID.generate()
 
+    direction = Map.get(attrs, :direction, "amoy_to_sepolia")
+    {source_chain, dest_chain} = chains_for_direction(direction)
+
     transfer_attrs = %{
-      id:            id,
-      wallet:        attrs.wallet,
-      token_address: attrs.token_address,
-      amount:        attrs.amount,
-      nonce_hash:    compute_nonce(attrs.wallet, id),
-      state:         "init",
-      direction:     Map.get(attrs, :direction, "amoy_to_sepolia")
+      id:                  id,
+      wallet:              attrs.wallet,
+      token_address:       attrs.token_address,
+      amount:              attrs.amount,
+      nonce_hash:          compute_nonce(attrs.wallet, id),
+      state:               "init",
+      direction:           direction,
+      compliance_status:   Map.get(attrs, :compliance_status, "approved"),
+      source_chain:        source_chain,
+      dest_chain:          dest_chain,
+      transfer_type:       transfer_type_for_direction(direction),
+      instruction_payload: Map.get(attrs, :instruction_payload),
+      asset_contract:      Map.get(attrs, :asset_contract),
+      asset_token_id:      Map.get(attrs, :asset_token_id)
     }
 
     with {:ok, _record} <- Transfers.create(transfer_attrs) do
@@ -30,6 +40,20 @@ defmodule BharatCore.Bridge.TransferSupervisor do
       end
     end
   end
+
+  defp chains_for_direction("amoy_to_sepolia"),      do: {"amoy", "sepolia"}
+  defp chains_for_direction("sepolia_to_amoy"),      do: {"sepolia", "amoy"}
+  defp chains_for_direction("cbdc_to_stablecoin"),   do: {"anvil", "amoy"}
+  defp chains_for_direction("stablecoin_to_cbdc"),   do: {"amoy", "anvil"}
+  defp chains_for_direction("token_to_instruction"), do: {"anvil", "amoy"}
+  defp chains_for_direction("asset_to_instruction"), do: {"anvil", "amoy"}
+  defp chains_for_direction(_),                      do: {"amoy", "sepolia"}
+
+  defp transfer_type_for_direction("cbdc_to_stablecoin"),   do: "token_to_token"
+  defp transfer_type_for_direction("stablecoin_to_cbdc"),   do: "token_to_token"
+  defp transfer_type_for_direction("token_to_instruction"), do: "token_to_instruction"
+  defp transfer_type_for_direction("asset_to_instruction"), do: "asset_to_instruction"
+  defp transfer_type_for_direction(_),                      do: "token_to_token"
 
   defp compute_nonce(wallet, id) do
     :crypto.hash(:sha256, wallet <> id)

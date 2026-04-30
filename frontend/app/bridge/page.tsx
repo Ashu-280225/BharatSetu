@@ -30,7 +30,37 @@ const BURN_BRIDGE_ABI = [{
   outputs: [],
 }] as const;
 
-type Direction = "amoy_to_sepolia" | "sepolia_to_amoy";
+const LOCK_CBDC_ABI = [{
+  name: "lockCBDC", type: "function",
+  inputs: [{ name: "amount", type: "uint256" }, { name: "transferId", type: "bytes32" }],
+  outputs: [],
+}] as const;
+
+const LOCK_CBDC_INSTRUCTION_ABI = [{
+  name: "lockCBDCWithInstruction", type: "function",
+  inputs: [{ name: "amount", type: "uint256" }, { name: "transferId", type: "bytes32" }, { name: "instructionPayload", type: "bytes" }],
+  outputs: [],
+}] as const;
+
+const LOCK_ASSET_ABI = [{
+  name: "lockAsset", type: "function",
+  inputs: [
+    { name: "tokenContract", type: "address" },
+    { name: "tokenId", type: "uint256" },
+    { name: "transferId", type: "bytes32" },
+    { name: "instructionPayload", type: "bytes" },
+  ],
+  outputs: [],
+}] as const;
+
+const ERC721_APPROVE_ABI = [{
+  name: "approve", type: "function",
+  inputs: [{ name: "to", type: "address" }, { name: "tokenId", type: "uint256" }],
+  outputs: [],
+}] as const;
+
+type Direction = "amoy_to_sepolia" | "sepolia_to_amoy" | "cbdc_to_stablecoin" | "token_to_instruction" | "asset_to_instruction";
+type BridgeMode = "evm" | "cbdc" | "token_instruction" | "asset_instruction";
 type Step = "connect" | "login" | "form" | "pending" | "done" | "error";
 
 const STEPS_FORWARD = [
@@ -47,6 +77,30 @@ const STEPS_REVERSE = [
   { key: "confirmed", label: "Relayer Processing",    desc: "Relayer detected burn — unlocking tCCS on Amoy",    eta: "~30 sec" },
   { key: "minted",    label: "Tokens Released",       desc: "tCCS tokens released on Amoy",                      eta: null },
   { key: "completed", label: "Complete",              desc: "Bridge transfer finished",                           eta: null },
+];
+
+const STEPS_CBDC = [
+  { key: "init",      label: "Compliance Check + Lock", desc: "KYC/OFAC verified — approve INRDC + lock in CBDC Vault", eta: null },
+  { key: "locked",    label: "Awaiting Confirmation",   desc: "Waiting for 3 block confirmations on local chain",        eta: "~15 sec" },
+  { key: "confirmed", label: "Hub Relay Processing",    desc: "2-of-3 relayers signing approval — minting INRX on Amoy", eta: "~30 sec" },
+  { key: "minted",    label: "Stablecoin Minted",       desc: "INRX tokens minted on Polygon Amoy",                      eta: null },
+  { key: "completed", label: "Complete",                desc: "CBDC → Stablecoin conversion finished",                    eta: null },
+];
+
+const STEPS_TOKEN_INSTRUCTION = [
+  { key: "init",      label: "Compliance Check + Lock", desc: "KYC/OFAC verified — approve INRDC + lock with instruction payload", eta: null },
+  { key: "locked",    label: "Awaiting Confirmation",   desc: "Waiting for 3 block confirmations on local chain",                   eta: "~15 sec" },
+  { key: "confirmed", label: "Hub Relay Processing",    desc: "2-of-3 relayers signing — executing instruction on Amoy",            eta: "~30 sec" },
+  { key: "minted",    label: "Instruction Executed",    desc: "Instruction executed on Polygon Amoy",                               eta: null },
+  { key: "completed", label: "Complete",                desc: "Token → Instruction bridge finished",                                eta: null },
+];
+
+const STEPS_ASSET_INSTRUCTION = [
+  { key: "init",      label: "Compliance Check + Lock", desc: "KYC/OFAC verified — approve ERC721 + lock asset with instruction",  eta: null },
+  { key: "locked",    label: "Awaiting Confirmation",   desc: "Waiting for 3 block confirmations on local chain",                   eta: "~15 sec" },
+  { key: "confirmed", label: "Hub Relay Processing",    desc: "2-of-3 relayers signing — executing asset instruction on Amoy",      eta: "~30 sec" },
+  { key: "minted",    label: "Instruction Executed",    desc: "Asset instruction executed on Polygon Amoy",                         eta: null },
+  { key: "completed", label: "Complete",                desc: "Asset → Instruction bridge finished",                                eta: null },
 ];
 
 const STATE_ORDER = ["init", "locked", "confirmed", "minted", "completed"];
@@ -67,6 +121,7 @@ function truncate(addr: string) {
 function chainInfo(id: number) {
   if (id === 80002)    return { name: "Polygon Amoy",     cls: "amoy",    symbol: "POL" };
   if (id === 11155111) return { name: "Ethereum Sepolia", cls: "sepolia", symbol: "ETH" };
+  if (id === 31337)    return { name: "Anvil (CBDC)",     cls: "anvil",   symbol: "ETH" };
   return { name: `Chain ${id}`, cls: "unknown", symbol: "?" };
 }
 
@@ -78,16 +133,20 @@ export default function BridgePage() {
   const chainId = useChainId();
   const { switchChain } = useSwitchChain();
 
-  const [step, setStep]         = useState<Step>("connect");
-  const [direction, setDirection] = useState<Direction>("amoy_to_sepolia");
-  const [amount, setAmount]     = useState("");
-  const [transferId, setTransferId] = useState<string | null>(null);
-  const [transfer, setTransfer] = useState<Transfer | null>(null);
-  const [config, setConfig]     = useState<BridgeConfig | null>(null);
-  const [error, setError]       = useState<string | null>(null);
+  const [step, setStep]               = useState<Step>("connect");
+  const [bridgeMode, setBridgeMode]   = useState<BridgeMode>("evm");
+  const [direction, setDirection]     = useState<Direction>("amoy_to_sepolia");
+  const [amount, setAmount]           = useState("");
+  const [instructionPayload, setInstructionPayload] = useState("");
+  const [assetContract, setAssetContract]           = useState("");
+  const [assetTokenId, setAssetTokenId]             = useState("");
+  const [transferId, setTransferId]   = useState<string | null>(null);
+  const [transfer, setTransfer]       = useState<Transfer | null>(null);
+  const [config, setConfig]           = useState<BridgeConfig | null>(null);
+  const [error, setError]             = useState<string | null>(null);
   const [errorContext, setErrorContext] = useState<"login" | "tx">("tx");
-  const [submitting, setSubmitting] = useState(false);
-  const [copied, setCopied]     = useState(false);
+  const [submitting, setSubmitting]   = useState(false);
+  const [copied, setCopied]           = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -100,14 +159,21 @@ export default function BridgePage() {
     return () => { cancelled = true; };
   }, []);
 
-  const expectedChain = direction === "amoy_to_sepolia"
-    ? (config?.amoy_chain_id ?? 80002)
-    : (config?.sepolia_chain_id ?? 11155111);
+  const isAnvilMode = direction === "cbdc_to_stablecoin" || direction === "token_to_instruction" || direction === "asset_to_instruction";
+
+  const expectedChain =
+    direction === "amoy_to_sepolia" ? (config?.amoy_chain_id ?? 80002) :
+    isAnvilMode                     ? (config?.anvil_chain_id ?? 31337) :
+    (config?.sepolia_chain_id ?? 11155111);
 
   const onWrongChain = step === "form" && !!config && chainId !== expectedChain;
 
   const tokenAddress = config
-    ? (direction === "amoy_to_sepolia" ? config.tccs_token : config.mint_bridge) as `0x${string}`
+    ? (direction === "amoy_to_sepolia"                ? config.tccs_token
+      : direction === "cbdc_to_stablecoin"            ? (config.mock_cbdc_token ?? "")
+      : direction === "token_to_instruction"          ? (config.mock_cbdc_token ?? "")
+      : direction === "asset_to_instruction"          ? undefined  // ERC721 — no ERC20 balance
+      : config.mint_bridge) as `0x${string}`
     : undefined;
 
   const { data: balanceData } = useBalance({
@@ -124,7 +190,11 @@ export default function BridgePage() {
   const insufficientBalance = !!balanceData && amountNum > 0
     && amountNum > parseFloat(formatUnits(balanceData.value, balanceData.decimals));
   const chain = chainInfo(chainId);
-  const steps = direction === "amoy_to_sepolia" ? STEPS_FORWARD : STEPS_REVERSE;
+  const steps = direction === "amoy_to_sepolia"      ? STEPS_FORWARD
+    : direction === "cbdc_to_stablecoin"              ? STEPS_CBDC
+    : direction === "token_to_instruction"            ? STEPS_TOKEN_INSTRUCTION
+    : direction === "asset_to_instruction"            ? STEPS_ASSET_INSTRUCTION
+    : STEPS_REVERSE;
 
   // Restore in-progress transfer
   useEffect(() => {
@@ -178,17 +248,29 @@ export default function BridgePage() {
     setSubmitting(true);
     setError(null);
     const log = (s: string, d?: unknown) => console.log(`[Bridge] ${s}`, d ?? "");
-    const { lock_bridge, mint_bridge, tccs_token } = config;
+    const { lock_bridge, mint_bridge, tccs_token, cbdc_vault, asset_vault, mock_cbdc_token, mock_asset_contract } = config;
 
     try {
-      const { data } = await createTransfer(tccs_token, amount, direction);
+      const sourceToken = direction === "asset_to_instruction"
+        ? (mock_asset_contract ?? "")
+        : direction === "cbdc_to_stablecoin" || direction === "token_to_instruction"
+          ? (mock_cbdc_token ?? "")
+          : tccs_token;
+
+      const extra = direction === "token_to_instruction"
+        ? { instruction_payload: instructionPayload }
+        : direction === "asset_to_instruction"
+          ? { asset_contract: assetContract || (mock_asset_contract ?? ""), asset_token_id: assetTokenId, instruction_payload: instructionPayload }
+          : undefined;
+
+      const { data } = await createTransfer(sourceToken, amount, direction, extra);
       log("created", data.id);
       setTransferId(data.id);
       localStorage.setItem("activeTransferId", data.id);
-      setTransfer({ id: data.id, state: "init", direction, wallet: address!, token_address: tccs_token, amount, nonce_hash: "", lock_tx_hash: null, mint_tx_hash: null, inserted_at: "" });
+      setTransfer({ id: data.id, state: "init", direction, wallet: address!, token_address: sourceToken, amount, nonce_hash: "", compliance_status: "approved", source_chain: null, dest_chain: null, transfer_type: null, instruction_payload: null, asset_contract: null, asset_token_id: null, lock_tx_hash: null, mint_tx_hash: null, failure_reason: null, inserted_at: "" });
       setStep("pending");
 
-      const amountWei = BigInt(amount) * BigInt(10 ** 18);
+      const amountWei = BigInt(Math.floor(parseFloat(amount) * 10 ** 18));
       const transferIdBytes = `0x${data.id.replace(/-/g, "").padEnd(64, "0")}` as `0x${string}`;
 
       if (direction === "amoy_to_sepolia") {
@@ -199,7 +281,6 @@ export default function BridgePage() {
           ...fees,
         });
         await publicClient!.waitForTransactionReceipt({ hash: approveTx, confirmations: 1 });
-
         const txHash = await sendTransactionAsync({
           to: lock_bridge as `0x${string}`,
           data: encodeFunctionData({ abi: LOCK_BRIDGE_ABI, functionName: "lockTokens", args: [tccs_token as `0x${string}`, amountWei, transferIdBytes] }),
@@ -208,6 +289,66 @@ export default function BridgePage() {
         await publicClient!.waitForTransactionReceipt({ hash: txHash, confirmations: 1 });
         setTransfer((prev) => prev ? { ...prev, lock_tx_hash: txHash } : null);
         await confirmLock(data.id, txHash);
+
+      } else if (direction === "cbdc_to_stablecoin") {
+        const fees = { gas: BigInt(150000) };
+        const approveTx = await sendTransactionAsync({
+          to: mock_cbdc_token as `0x${string}`,
+          data: encodeFunctionData({ abi: ERC20_APPROVE_ABI, functionName: "approve", args: [cbdc_vault as `0x${string}`, amountWei] }),
+          ...fees,
+        });
+        await publicClient!.waitForTransactionReceipt({ hash: approveTx, confirmations: 1 });
+        const txHash = await sendTransactionAsync({
+          to: cbdc_vault as `0x${string}`,
+          data: encodeFunctionData({ abi: LOCK_CBDC_ABI, functionName: "lockCBDC", args: [amountWei, transferIdBytes] }),
+          ...fees,
+        });
+        await publicClient!.waitForTransactionReceipt({ hash: txHash, confirmations: 1 });
+        setTransfer((prev) => prev ? { ...prev, lock_tx_hash: txHash } : null);
+        await confirmLock(data.id, txHash);
+
+      } else if (direction === "token_to_instruction") {
+        const fees = { gas: BigInt(200000) };
+        const payloadBytes = instructionPayload.startsWith("0x")
+          ? instructionPayload as `0x${string}`
+          : `0x${Buffer.from(instructionPayload).toString("hex")}` as `0x${string}`;
+        const approveTx = await sendTransactionAsync({
+          to: mock_cbdc_token as `0x${string}`,
+          data: encodeFunctionData({ abi: ERC20_APPROVE_ABI, functionName: "approve", args: [cbdc_vault as `0x${string}`, amountWei] }),
+          ...fees,
+        });
+        await publicClient!.waitForTransactionReceipt({ hash: approveTx, confirmations: 1 });
+        const txHash = await sendTransactionAsync({
+          to: cbdc_vault as `0x${string}`,
+          data: encodeFunctionData({ abi: LOCK_CBDC_INSTRUCTION_ABI, functionName: "lockCBDCWithInstruction", args: [amountWei, transferIdBytes, payloadBytes] }),
+          ...fees,
+        });
+        await publicClient!.waitForTransactionReceipt({ hash: txHash, confirmations: 1 });
+        setTransfer((prev) => prev ? { ...prev, lock_tx_hash: txHash } : null);
+        await confirmLock(data.id, txHash);
+
+      } else if (direction === "asset_to_instruction") {
+        const fees = { gas: BigInt(200000) };
+        const tokenContract = (assetContract || mock_asset_contract) as `0x${string}`;
+        const tokenId = BigInt(assetTokenId || 0);
+        const payloadBytes = instructionPayload.startsWith("0x")
+          ? instructionPayload as `0x${string}`
+          : `0x${Buffer.from(instructionPayload).toString("hex")}` as `0x${string}`;
+        const approveTx = await sendTransactionAsync({
+          to: tokenContract,
+          data: encodeFunctionData({ abi: ERC721_APPROVE_ABI, functionName: "approve", args: [asset_vault as `0x${string}`, tokenId] }),
+          ...fees,
+        });
+        await publicClient!.waitForTransactionReceipt({ hash: approveTx, confirmations: 1 });
+        const txHash = await sendTransactionAsync({
+          to: asset_vault as `0x${string}`,
+          data: encodeFunctionData({ abi: LOCK_ASSET_ABI, functionName: "lockAsset", args: [tokenContract, tokenId, transferIdBytes, payloadBytes] }),
+          ...fees,
+        });
+        await publicClient!.waitForTransactionReceipt({ hash: txHash, confirmations: 1 });
+        setTransfer((prev) => prev ? { ...prev, lock_tx_hash: txHash } : null);
+        await confirmLock(data.id, txHash);
+
       } else {
         const fees = { gas: BigInt(80000), maxFeePerGas: BigInt(5_000_000_000), maxPriorityFeePerGas: BigInt(1_000_000_000) };
         const txHash = await sendTransactionAsync({
@@ -226,7 +367,12 @@ export default function BridgePage() {
       console.error("[Bridge] ERROR", e);
       localStorage.removeItem("activeTransferId");
       setErrorContext("tx");
-      setError((e as Error).message);
+      const msg = (e as Error).message;
+      setError(
+        msg === "ofac_blocked" ? "This wallet is on the OFAC sanctions list and cannot use this bridge." :
+        msg === "kyc_required" ? "KYC verification required. Your wallet has not been verified. Contact support." :
+        msg
+      );
       setStep("error");
     } finally {
       setSubmitting(false);
@@ -235,8 +381,9 @@ export default function BridgePage() {
 
   const reset = () => {
     localStorage.removeItem("activeTransferId");
-    setStep("form"); setTransfer(null); setTransferId(null); setAmount(""); setError(null);
-    // direction preserved intentionally — user likely wants to bridge back
+    setStep("form"); setTransfer(null); setTransferId(null);
+    setAmount(""); setInstructionPayload(""); setAssetContract(""); setAssetTokenId("");
+    setError(null);
   };
 
   const handleCancel = async () => {
@@ -331,30 +478,113 @@ export default function BridgePage() {
             </span>
           </div>
 
-          {/* Direction toggle */}
-          <div className="direction-toggle">
-            <div className={`chain-box ${direction === "amoy_to_sepolia" ? "active" : ""}`}
-              onClick={() => setDirection("amoy_to_sepolia")}>
-              <div className="chain-name" style={{ color: direction === "amoy_to_sepolia" ? "var(--primary)" : "var(--text)" }}>
-                Polygon Amoy
-              </div>
-              <div className="chain-label">
-                tCCS · {direction === "amoy_to_sepolia" ? "Source" : "Destination"}
-              </div>
-            </div>
-            <button className="swap-btn" onClick={() => setDirection(d => d === "amoy_to_sepolia" ? "sepolia_to_amoy" : "amoy_to_sepolia")}>
-              ⇄
-            </button>
-            <div className={`chain-box ${direction === "sepolia_to_amoy" ? "active" : ""}`}
-              onClick={() => setDirection("sepolia_to_amoy")}>
-              <div className="chain-name" style={{ color: direction === "sepolia_to_amoy" ? "var(--primary)" : "var(--text)" }}>
-                Ethereum Sepolia
-              </div>
-              <div className="chain-label">
-                wCCC · {direction === "sepolia_to_amoy" ? "Source" : "Destination"}
-              </div>
-            </div>
+          {/* Bridge mode selector */}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", marginBottom: "1rem" }}>
+            {([
+              { mode: "evm",               label: "EVM Bridge",          sub: "tCCS ↔ wCCC" },
+              { mode: "cbdc",              label: "Token → Token",       sub: "INRDC → INRX" },
+              { mode: "token_instruction", label: "Token → Instruction", sub: "CBDC + payload" },
+              { mode: "asset_instruction", label: "Asset → Instruction", sub: "ERC721 + payload" },
+            ] as { mode: BridgeMode; label: string; sub: string }[]).map(({ mode, label, sub }) => (
+              <button
+                key={mode}
+                onClick={() => {
+                  setBridgeMode(mode);
+                  const dir: Direction =
+                    mode === "evm"               ? "amoy_to_sepolia"
+                    : mode === "cbdc"            ? "cbdc_to_stablecoin"
+                    : mode === "token_instruction" ? "token_to_instruction"
+                    : "asset_to_instruction";
+                  setDirection(dir);
+                }}
+                style={{
+                  flex: "1 1 calc(50% - 0.25rem)", padding: "0.45rem 0.5rem", borderRadius: 8,
+                  fontSize: "0.78rem", fontWeight: 600, cursor: "pointer", textAlign: "center",
+                  background: bridgeMode === mode ? "var(--primary)" : "var(--surface2)",
+                  color: bridgeMode === mode ? "#000" : "var(--muted)",
+                  border: `1px solid ${bridgeMode === mode ? "var(--primary)" : "var(--border)"}`,
+                }}
+              >
+                <div>{label}</div>
+                <div style={{ fontSize: "0.68rem", fontWeight: 400, opacity: 0.75 }}>{sub}</div>
+              </button>
+            ))}
           </div>
+
+          {/* Direction toggle — EVM mode */}
+          {bridgeMode === "evm" && (
+            <div className="direction-toggle">
+              <div className={`chain-box ${direction === "amoy_to_sepolia" ? "active" : ""}`}
+                onClick={() => setDirection("amoy_to_sepolia")}>
+                <div className="chain-name" style={{ color: direction === "amoy_to_sepolia" ? "var(--primary)" : "var(--text)" }}>
+                  Polygon Amoy
+                </div>
+                <div className="chain-label">tCCS · {direction === "amoy_to_sepolia" ? "Source" : "Destination"}</div>
+              </div>
+              <button className="swap-btn" onClick={() => setDirection(d => d === "amoy_to_sepolia" ? "sepolia_to_amoy" : "amoy_to_sepolia")}>⇄</button>
+              <div className={`chain-box ${direction === "sepolia_to_amoy" ? "active" : ""}`}
+                onClick={() => setDirection("sepolia_to_amoy")}>
+                <div className="chain-name" style={{ color: direction === "sepolia_to_amoy" ? "var(--primary)" : "var(--text)" }}>
+                  Ethereum Sepolia
+                </div>
+                <div className="chain-label">wCCC · {direction === "sepolia_to_amoy" ? "Source" : "Destination"}</div>
+              </div>
+            </div>
+          )}
+
+          {/* Direction display — CBDC Token→Token mode */}
+          {bridgeMode === "cbdc" && (
+            <div className="direction-toggle">
+              <div className="chain-box active">
+                <div className="chain-name" style={{ color: "var(--primary)" }}>Anvil (CBDC Ledger)</div>
+                <div className="chain-label">INRDC · Source · Permissioned</div>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                <span style={{ fontSize: "1.3rem", color: "var(--primary)" }}>→</span>
+                <span style={{ fontSize: "0.65rem", color: "var(--muted)" }}>2-of-3 Hub</span>
+              </div>
+              <div className="chain-box active">
+                <div className="chain-name" style={{ color: "var(--primary)" }}>Polygon Amoy</div>
+                <div className="chain-label">INRX · Destination · Public</div>
+              </div>
+            </div>
+          )}
+
+          {/* Direction display — Token→Instruction mode */}
+          {bridgeMode === "token_instruction" && (
+            <div className="direction-toggle">
+              <div className="chain-box active">
+                <div className="chain-name" style={{ color: "var(--primary)" }}>Anvil (CBDC Ledger)</div>
+                <div className="chain-label">INRDC + Instruction · Source</div>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                <span style={{ fontSize: "1.3rem", color: "var(--primary)" }}>→</span>
+                <span style={{ fontSize: "0.65rem", color: "var(--muted)" }}>2-of-3 Hub</span>
+              </div>
+              <div className="chain-box active">
+                <div className="chain-name" style={{ color: "var(--primary)" }}>Polygon Amoy</div>
+                <div className="chain-label">Execute Instruction · Destination</div>
+              </div>
+            </div>
+          )}
+
+          {/* Direction display — Asset→Instruction mode */}
+          {bridgeMode === "asset_instruction" && (
+            <div className="direction-toggle">
+              <div className="chain-box active">
+                <div className="chain-name" style={{ color: "var(--primary)" }}>Anvil (CBDC Ledger)</div>
+                <div className="chain-label">ERC721 Asset + Instruction · Source</div>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                <span style={{ fontSize: "1.3rem", color: "var(--primary)" }}>→</span>
+                <span style={{ fontSize: "0.65rem", color: "var(--muted)" }}>2-of-3 Hub</span>
+              </div>
+              <div className="chain-box active">
+                <div className="chain-name" style={{ color: "var(--primary)" }}>Polygon Amoy</div>
+                <div className="chain-label">Execute Asset Instruction · Destination</div>
+              </div>
+            </div>
+          )}
 
           {/* Wrong chain warning + auto-switch */}
           {onWrongChain && (
@@ -396,12 +626,61 @@ export default function BridgePage() {
               placeholder="0"
             />
             <span className="amount-token">
-              {direction === "amoy_to_sepolia" ? "tCCS" : "wCCC"}
+              {direction === "amoy_to_sepolia" ? "tCCS"
+                : direction === "cbdc_to_stablecoin" || direction === "token_to_instruction" ? "INRDC"
+                : direction === "asset_to_instruction" ? "N/A"
+                : "wCCC"}
             </span>
           </div>
           {insufficientBalance && (
             <div style={{ color: "var(--red)", fontSize: "0.78rem", marginTop: "-0.75rem", marginBottom: "0.75rem" }}>
               Insufficient balance
+            </div>
+          )}
+
+          {/* Asset fields — Asset→Instruction mode */}
+          {bridgeMode === "asset_instruction" && (
+            <div style={{ marginBottom: "1rem" }}>
+              <div className="amount-label" style={{ marginBottom: "0.4rem" }}>Asset Contract (ERC721)</div>
+              <input
+                className="amount-input"
+                style={{ fontSize: "0.82rem" }}
+                type="text"
+                value={assetContract}
+                onChange={(e) => setAssetContract(e.target.value)}
+                placeholder={config?.mock_asset_contract ?? "0x… (leave blank for MockAsset)"}
+              />
+              <div className="amount-label" style={{ marginTop: "0.75rem", marginBottom: "0.4rem" }}>Token ID</div>
+              <input
+                className="amount-input"
+                type="number"
+                value={assetTokenId}
+                onChange={(e) => setAssetTokenId(e.target.value)}
+                placeholder="0"
+              />
+            </div>
+          )}
+
+          {/* Instruction payload — Token→Instruction and Asset→Instruction */}
+          {(bridgeMode === "token_instruction" || bridgeMode === "asset_instruction") && (
+            <div style={{ marginBottom: "1rem" }}>
+              <div className="amount-label" style={{ marginBottom: "0.4rem" }}>
+                Instruction Payload
+                <span style={{ fontWeight: 400, color: "var(--muted)", marginLeft: 6, fontSize: "0.72rem" }}>
+                  hex (0x…) or UTF-8 text
+                </span>
+              </div>
+              <textarea
+                style={{
+                  width: "100%", minHeight: 80, padding: "0.5rem 0.75rem",
+                  background: "var(--surface2)", border: "1px solid var(--border)",
+                  borderRadius: 8, color: "var(--text)", fontSize: "0.8rem",
+                  fontFamily: "monospace", resize: "vertical", boxSizing: "border-box",
+                }}
+                value={instructionPayload}
+                onChange={(e) => setInstructionPayload(e.target.value)}
+                placeholder='e.g. {"action":"settle","tradeId":"T-001"} or 0xdeadbeef'
+              />
             </div>
           )}
 
@@ -431,13 +710,17 @@ export default function BridgePage() {
           <button
             className="btn-primary"
             onClick={handleSubmit}
-            disabled={!amount || !config || onWrongChain || insufficientBalance || submitting}
+            disabled={(!amount && direction !== "asset_to_instruction") || !config || onWrongChain || insufficientBalance || submitting}
           >
             {submitting
               ? <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
                   <span className="spinner" /> Processing…
                 </span>
-              : direction === "amoy_to_sepolia" ? "Lock & Bridge →" : "Burn & Bridge →"
+              : direction === "amoy_to_sepolia"       ? "Lock & Bridge →"
+              : direction === "cbdc_to_stablecoin"    ? "Lock CBDC & Convert →"
+              : direction === "token_to_instruction"  ? "Lock CBDC + Submit Instruction →"
+              : direction === "asset_to_instruction"  ? "Lock Asset + Submit Instruction →"
+              : "Burn & Bridge →"
             }
           </button>
         </div>
@@ -535,9 +818,9 @@ export default function BridgePage() {
 
           {transfer.state === "completed" && (
             <p className="text-sm" style={{ color: "var(--primary)", marginBottom: "1.25rem" }}>
-              {transfer.direction === "amoy_to_sepolia"
-                ? `${transfer.amount} wCCC has been minted to your wallet on Sepolia.`
-                : `${transfer.amount} tCCS has been unlocked to your wallet on Amoy.`}
+              {transfer.direction === "amoy_to_sepolia"    ? `${transfer.amount} wCCC minted to your wallet on Sepolia.`
+              : transfer.direction === "cbdc_to_stablecoin" ? `${transfer.amount} INRX minted to your wallet on Polygon Amoy. CBDC locked in vault.`
+              : `${transfer.amount} tCCS unlocked to your wallet on Amoy.`}
             </p>
           )}
 

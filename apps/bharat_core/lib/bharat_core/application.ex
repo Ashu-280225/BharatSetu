@@ -29,6 +29,9 @@ defmodule BharatCore.Application do
       # Sepolia indexer — polls TokensBurned events for Sepolia→Amoy
       BharatCore.Indexer.SepoliaIndexer,
 
+      # Anvil indexer — polls CBDCLocked events for cbdc_to_stablecoin (POC v2)
+      BharatCore.Indexer.AnvilIndexer,
+
       # Expires init transfers with no tx hash older than 10 min
       BharatCore.Bridge.InitTimeoutWorker,
 

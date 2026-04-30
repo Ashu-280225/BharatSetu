@@ -107,11 +107,18 @@ defmodule BharatCore.Bridge.TransferServer do
   @impl true
   def handle_continue(:init_transfer, s) do
     payload =
-      if s.direction == "amoy_to_sepolia" do
-        unsigned_tx = Contract.build_lock_tx(s.token_address, s.amount, s.id)
-        %{event: "await_lock", transfer_id: s.id, unsigned_tx: unsigned_tx, nonce_hash: s.nonce_hash}
-      else
-        %{event: "await_burn", transfer_id: s.id, nonce_hash: s.nonce_hash}
+      case s.direction do
+        "amoy_to_sepolia" ->
+          unsigned_tx = Contract.build_lock_tx(s.token_address, s.amount, s.id)
+          %{event: "await_lock", transfer_id: s.id, unsigned_tx: unsigned_tx, nonce_hash: s.nonce_hash}
+
+        "cbdc_to_stablecoin" ->
+          unsigned_tx = Contract.build_lock_cbdc_tx(s.amount, s.id)
+          %{event: "await_cbdc_lock", transfer_id: s.id, unsigned_tx: unsigned_tx, nonce_hash: s.nonce_hash}
+
+        _ ->
+          # sepolia_to_amoy + stablecoin_to_cbdc — user burns, no unsigned tx needed
+          %{event: "await_burn", transfer_id: s.id, nonce_hash: s.nonce_hash}
       end
 
     broadcast(s.id, payload)

@@ -51,17 +51,33 @@ export type Transfer = {
   amount: string;
   nonce_hash: string;
   state: "init" | "locked" | "confirmed" | "minted" | "completed" | "failed";
-  direction: "amoy_to_sepolia" | "sepolia_to_amoy";
+  direction: "amoy_to_sepolia" | "sepolia_to_amoy" | "cbdc_to_stablecoin" | "stablecoin_to_cbdc" | "token_to_instruction" | "asset_to_instruction";
+  compliance_status: "approved" | "rejected" | null;
+  source_chain: string | null;
+  dest_chain: string | null;
+  transfer_type: "token_to_token" | "token_to_instruction" | "asset_to_instruction" | null;
+  instruction_payload: string | null;
+  asset_contract: string | null;
+  asset_token_id: number | null;
   lock_tx_hash: string | null;
   mint_tx_hash: string | null;
   failure_reason: string | null;
   inserted_at: string;
 };
 
-export async function createTransfer(token_address: string, amount: string, direction = "amoy_to_sepolia") {
+export async function createTransfer(
+  token_address: string,
+  amount: string,
+  direction = "amoy_to_sepolia",
+  extra?: {
+    instruction_payload?: string;
+    asset_contract?: string;
+    asset_token_id?: string;
+  }
+) {
   return request<{ data: { id: string; state: string } }>(
     "/transfers",
-    { method: "POST", body: JSON.stringify({ token_address, amount, direction }) }
+    { method: "POST", body: JSON.stringify({ token_address, amount, direction, ...extra }) }
   );
 }
 
@@ -103,11 +119,19 @@ export async function getPrices() {
 // ── Config ────────────────────────────────────────────────────────────────
 
 export type BridgeConfig = {
+  // POC v1 — Amoy ↔ Sepolia
   lock_bridge: string;
   mint_bridge: string;
   tccs_token: string;
   amoy_chain_id: number;
   sepolia_chain_id: number;
+  // POC v2 — Anvil ↔ Amoy (CBDC ↔ Stablecoin Hub-and-Spoke)
+  cbdc_vault: string | null;
+  asset_vault: string | null;
+  stablecoin_bridge: string | null;
+  mock_cbdc_token: string | null;
+  mock_asset_contract: string | null;
+  anvil_chain_id: number;
 };
 
 export async function getConfig() {

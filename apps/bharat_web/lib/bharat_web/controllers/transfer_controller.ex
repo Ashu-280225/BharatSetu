@@ -30,17 +30,32 @@ defmodule BharatWeb.TransferController do
   end
 
   def create(conn, params) do
-    wallet = conn.assigns.wallet
+    wallet    = conn.assigns.wallet
+    direction = params["direction"] || "amoy_to_sepolia"
 
+    # Compliance gate — required for CBDC flows, advisory for EVM flows
+    with :ok <- maybe_check_compliance(direction, wallet) do
+      do_create(conn, wallet, direction, params)
+    else
+      {:error, reason} ->
+        conn |> put_status(:forbidden) |> json(%{error: to_string(reason)})
+    end
+  end
+
+  defp do_create(conn, wallet, direction, params) do
     attrs = %{
-      wallet:        wallet,
-      token_address: params["token_address"],
-      amount:        parse_amount(params["amount"]),
-      direction:     params["direction"] || "amoy_to_sepolia"
+      wallet:              wallet,
+      token_address:       params["token_address"],
+      amount:              parse_amount(params["amount"]),
+      direction:           direction,
+      compliance_status:   "approved",
+      instruction_payload: params["instruction_payload"],
+      asset_contract:      params["asset_contract"],
+      asset_token_id:      params["asset_token_id"] && String.to_integer(params["asset_token_id"])
     }
 
     require Logger
-    Logger.info("[TransferController.create] wallet=#{wallet} token=#{attrs.token_address} amount=#{attrs.amount}")
+    Logger.info("[TransferController.create] wallet=#{wallet} token=#{attrs.token_address} amount=#{attrs.amount} direction=#{direction}")
 
     case TransferSupervisor.start_transfer(attrs) do
       {:ok, id} ->
@@ -56,6 +71,13 @@ defmodule BharatWeb.TransferController do
         |> json(%{error: inspect(reason)})
     end
   end
+
+  @cbdc_directions ~w(cbdc_to_stablecoin stablecoin_to_cbdc token_to_instruction asset_to_instruction)
+
+  defp maybe_check_compliance(direction, wallet) when direction in @cbdc_directions do
+    BharatCore.Compliance.Engine.check(wallet)
+  end
+  defp maybe_check_compliance(_direction, _wallet), do: :ok
 
   def confirm_lock(conn, %{"id" => id, "tx_hash" => tx_hash}) do
     wallet = conn.assigns.wallet
@@ -118,17 +140,24 @@ defmodule BharatWeb.TransferController do
 
   defp serialize(%Transfer{} = t) do
     %{
-      id:             t.id,
-      wallet:         t.wallet,
-      token_address:  t.token_address,
-      amount:         t.amount,
-      nonce_hash:     t.nonce_hash,
-      state:          t.state,
-      direction:      t.direction,
-      lock_tx_hash:   t.lock_tx_hash,
-      mint_tx_hash:   t.mint_tx_hash,
-      failure_reason: t.failure_reason,
-      inserted_at:    t.inserted_at
+      id:                  t.id,
+      wallet:              t.wallet,
+      token_address:       t.token_address,
+      amount:              t.amount,
+      nonce_hash:          t.nonce_hash,
+      state:               t.state,
+      direction:           t.direction,
+      compliance_status:   t.compliance_status,
+      source_chain:        t.source_chain,
+      dest_chain:          t.dest_chain,
+      transfer_type:       t.transfer_type,
+      instruction_payload: t.instruction_payload,
+      asset_contract:      t.asset_contract,
+      asset_token_id:      t.asset_token_id,
+      lock_tx_hash:        t.lock_tx_hash,
+      mint_tx_hash:        t.mint_tx_hash,
+      failure_reason:      t.failure_reason,
+      inserted_at:         t.inserted_at
     }
   end
 
