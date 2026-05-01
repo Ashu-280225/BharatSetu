@@ -3,7 +3,7 @@ defmodule BharatData.Schemas.Transfer do
   import Ecto.Changeset
 
   @valid_states ~w(init locked confirmed minted completed failed)
-  @valid_directions ~w(amoy_to_sepolia sepolia_to_amoy cbdc_to_stablecoin stablecoin_to_cbdc token_to_instruction asset_to_instruction)
+  @valid_directions ~w(amoy_to_sepolia sepolia_to_amoy cbdc_to_stablecoin stablecoin_to_cbdc token_to_instruction asset_to_instruction evm_to_solana)
   @valid_compliance_statuses ~w(approved rejected)
   @valid_transfer_types ~w(token_to_token token_to_instruction asset_to_instruction)
   @primary_key {:id, :binary_id, autogenerate: true}
@@ -29,6 +29,10 @@ defmodule BharatData.Schemas.Transfer do
     field :mint_tx_hash,         :string
     field :failure_reason,       :string
     field :relay_attempts,       :integer, default: 0
+    field :destination_zone,    :string
+    field :destination_address, :binary
+    field :solana_slot,         :integer
+    field :solana_tx_sig,       :string
 
     timestamps()
   end
@@ -39,7 +43,8 @@ defmodule BharatData.Schemas.Transfer do
                     :compliance_status, :source_chain, :dest_chain,
                     :transfer_type, :instruction_payload, :asset_contract, :asset_token_id,
                     :lock_tx_hash, :lock_block, :mint_tx_hash,
-                    :failure_reason, :relay_attempts])
+                    :failure_reason, :relay_attempts,
+                    :destination_zone, :destination_address, :solana_slot, :solana_tx_sig])
     |> validate_required([:wallet, :token_address, :amount, :nonce_hash])
     |> validate_inclusion(:state, @valid_states)
     |> validate_inclusion(:direction, @valid_directions)

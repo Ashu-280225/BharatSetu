@@ -43,6 +43,20 @@ defmodule BharatWeb.TransferController do
   end
 
   defp do_create(conn, wallet, direction, params) do
+    {destination_zone, destination_address} =
+      if direction == "evm_to_solana" do
+        pubkey_b58 = params["destination_address"]
+        unless pubkey_b58 do
+          conn
+          |> put_status(:bad_request)
+          |> json(%{error: "destination_address required for evm_to_solana"})
+          |> halt()
+        end
+        {"sol:devnet", B58.decode!(pubkey_b58)}
+      else
+        {nil, nil}
+      end
+
     attrs = %{
       wallet:              wallet,
       token_address:       params["token_address"],
@@ -51,7 +65,9 @@ defmodule BharatWeb.TransferController do
       compliance_status:   "approved",
       instruction_payload: params["instruction_payload"],
       asset_contract:      params["asset_contract"],
-      asset_token_id:      params["asset_token_id"] && String.to_integer(params["asset_token_id"])
+      asset_token_id:      params["asset_token_id"] && String.to_integer(params["asset_token_id"]),
+      destination_zone:    destination_zone,
+      destination_address: destination_address
     }
 
     require Logger

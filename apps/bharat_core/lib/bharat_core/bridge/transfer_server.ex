@@ -30,7 +30,8 @@ defmodule BharatCore.Bridge.TransferServer do
   alias BharatData.Transfers
 
   defstruct [:id, :wallet, :token_address, :amount,
-             :nonce_hash, :lock_tx_hash, :state, :direction, :started_at]
+             :nonce_hash, :lock_tx_hash, :state, :direction, :started_at,
+             :destination_zone, :destination_address]
 
   # ── Public API ────────────────────────────────────────────────────────────
 
@@ -71,6 +72,19 @@ defmodule BharatCore.Bridge.TransferServer do
     :ok
   end
 
+  # Called by SolanaIndexer or SolanaRelayWorker after Solana release confirmed
+  def on_solana_released(transfer_id, solana_tx_sig, solana_slot) do
+    case lookup(transfer_id) do
+      {:ok, pid} ->
+        GenServer.cast(pid, {:solana_released, solana_tx_sig, solana_slot})
+      {:error, _} ->
+        BharatData.Transfers.update_solana_released(transfer_id, solana_tx_sig, solana_slot)
+        BharatData.Transfers.update_state(transfer_id, "completed", %{})
+        broadcast(transfer_id, %{event: "completed", state: "completed", transfer_id: transfer_id})
+    end
+    :ok
+  end
+
   # Called by BharatRelayer.Worker after successful mint
   def on_minted(id, mint_tx_hash) do
     case lookup(id) do
@@ -93,10 +107,12 @@ defmodule BharatCore.Bridge.TransferServer do
       wallet:        opts[:wallet],
       token_address: opts[:token_address],
       amount:        opts[:amount],
-      nonce_hash:    compute_nonce(opts[:wallet], opts[:id]),
-      state:         :init,
-      direction:     opts[:direction] || "amoy_to_sepolia",
-      started_at:    DateTime.utc_now()
+      nonce_hash:          compute_nonce(opts[:wallet], opts[:id]),
+      state:               :init,
+      direction:           opts[:direction] || "amoy_to_sepolia",
+      started_at:          DateTime.utc_now(),
+      destination_zone:    opts[:destination_zone],
+      destination_address: opts[:destination_address]
     )
 
     {:ok, state, {:continue, :init_transfer}}
@@ -115,6 +131,14 @@ defmodule BharatCore.Bridge.TransferServer do
         "cbdc_to_stablecoin" ->
           unsigned_tx = Contract.build_lock_cbdc_tx(s.amount, s.id)
           %{event: "await_cbdc_lock", transfer_id: s.id, unsigned_tx: unsigned_tx, nonce_hash: s.nonce_hash}
+
+        "evm_to_solana" ->
+          unsigned_tx = Contract.build_evm_escrow_lock_tx(
+            s.token_address, s.amount, s.id,
+            s.destination_zone, s.destination_address
+          )
+          %{event: "await_lock", transfer_id: s.id, unsigned_tx: unsigned_tx,
+            nonce_hash: s.nonce_hash, chain: "evm_escrow"}
 
         _ ->
           # sepolia_to_amoy + stablecoin_to_cbdc — user burns, no unsigned tx needed
@@ -150,6 +174,15 @@ defmodule BharatCore.Bridge.TransferServer do
     Transfers.update_state(s.id, "minted", %{mint_tx_hash: mint_tx_hash})
     broadcast(s.id, %{event: "state_change", state: "minted", mint_tx_hash: mint_tx_hash})
     Logger.info("Transfer #{s.id} MINTED — tx #{mint_tx_hash}")
+    {:noreply, s, {:continue, :complete}}
+  end
+
+  def handle_cast({:solana_released, solana_tx_sig, _slot}, %{state: :confirmed} = s) do
+    s = %{s | state: :minted}
+    Transfers.update_state(s.id, "minted", %{mint_tx_hash: solana_tx_sig})
+    broadcast(s.id, %{event: "state_change", state: "sol_released",
+                       solana_tx_sig: solana_tx_sig})
+    Logger.info("Transfer #{s.id} SOL_RELEASED — sig #{solana_tx_sig}")
     {:noreply, s, {:continue, :complete}}
   end
 

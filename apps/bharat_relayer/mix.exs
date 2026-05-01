@@ -26,7 +26,9 @@ defmodule BharatRelayer.MixProject do
     [
       {:bharat_data, in_umbrella: true},
       {:bharat_adapters, in_umbrella: true},
-      {:bharat_core, in_umbrella: true}
+      {:bharat_core, in_umbrella: true},
+      {:b58, "~> 1.0"},
+      {:jason, "~> 1.4"}
     ]
   end
 end

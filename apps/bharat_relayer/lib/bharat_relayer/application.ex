@@ -4,6 +4,12 @@ defmodule BharatRelayer.Application do
   @impl true
   def start(_type, _args) do
     children = [
+      # Solana port (Node.js signer) — must start before SolanaRelayWorker
+      BharatAdapters.Blockchain.SolanaPortClient,
+
+      # EVM→Solana relay worker
+      BharatRelayer.SolanaRelayWorker,
+
       # POC v1 — amoy↔sepolia single relayer
       BharatRelayer.Worker,
       # POC v2 — block hash reporters (one per relayer address, threshold=2-of-3 in oracle)

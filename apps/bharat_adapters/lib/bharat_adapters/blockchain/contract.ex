@@ -28,6 +28,10 @@ defmodule BharatAdapters.Blockchain.Contract do
   # Amoy chain ID
   @amoy_chain_id 80_002
 
+  # keccak256("TokensLockedForZone(bytes32,address,uint256,address,string,bytes32,bytes)")
+  # Compute with: cast keccak "TokensLockedForZone(bytes32,address,uint256,address,string,bytes32,bytes)"
+  @tokens_locked_for_zone_topic "0x0000000000000000000000000000000000000000000000000000000000000000"
+
   def tokens_locked_topic, do: @tokens_locked_topic
   def tokens_burned_topic, do: @tokens_burned_topic
   def cbdc_locked_topic, do: @cbdc_locked_topic
@@ -603,5 +607,52 @@ defmodule BharatAdapters.Blockchain.Contract do
   defp amoy_http_url do
     Application.get_env(:bharat_core, :polygon_http_url) ||
       raise "polygon_http_url not configured"
+  end
+
+  defp evm_escrow_address do
+    Application.get_env(:bharat_core, :evm_escrow_contract) ||
+      raise "evm_escrow_contract not configured"
+  end
+
+  # ── EVMEscrow functions ───────────────────────────────────────────────────
+
+  def get_evm_escrow_logs(from_block, to_block) do
+    params = %{
+      fromBlock: "0x" <> Integer.to_string(from_block, 16),
+      toBlock:   "0x" <> Integer.to_string(to_block, 16),
+      address:   evm_escrow_address(),
+      topics:    [@tokens_locked_for_zone_topic]
+    }
+    Ethereumex.HttpClient.eth_get_logs(params)
+  end
+
+  # Build lockForZone() calldata — returned to frontend for MetaMask signing
+  def build_evm_escrow_lock_tx(token_address, amount, _transfer_id, destination_zone, destination_address_bytes) do
+    # lockForZone(address,uint256,string,bytes32,bytes)
+    # Static head (5 slots = 160 bytes):
+    #   token(32) + amount(32) + zoneOffset(32) + destAddr(32) + metaOffset(32)
+    zone_enc    = encode_bytes_elem(destination_zone)
+    meta_enc    = encode_bytes_elem(<<>>)
+    zone_offset = 160
+    meta_offset = zone_offset + byte_size(zone_enc)
+
+    args = IO.iodata_to_binary([
+      addr(token_address),
+      uint(Decimal.to_integer(amount)),
+      uint(zone_offset),
+      destination_address_bytes,
+      uint(meta_offset),
+      zone_enc,
+      meta_enc
+    ])
+
+    selector = <<0xAB, 0xCD, 0xEF, 0x12>> # placeholder — replace with cast sig output
+    calldata = selector <> args
+
+    %{
+      to:   evm_escrow_address(),
+      data: "0x" <> Base.encode16(calldata, case: :lower),
+      gas:  "0x493E0"
+    }
   end
 end

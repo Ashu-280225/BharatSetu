@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\visha\\\\OneDrive\\\\Desktop\\\\BharatSetu\" -Recurse -Directory)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\visha\\\\OneDrive\\\\Desktop\\\\BharatSetu\" -Recurse -Directory | ForEach-Object { $_.FullName } | Sort-Object)",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\visha\\\\OneDOne\\\\Desktop\\\\BharatSetu\" -File | ForEach-Object { $_.Name } | Sort-Object)",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\visha\\\\OneDrive\\\\Desktop\\\\BharatSetu\" -File | ForEach-Object { $_.Name } | Sort-Object)",
+      "Bash(Select-Object Name)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\visha\\\\OneDrive\\\\Desktop\\\\BharatSetu\" -Directory)",
+      "Bash(mix compile *)"
+    ]
+  }
+}

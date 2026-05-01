@@ -24,7 +24,9 @@ defmodule BharatCore.Bridge.TransferSupervisor do
       transfer_type:       transfer_type_for_direction(direction),
       instruction_payload: Map.get(attrs, :instruction_payload),
       asset_contract:      Map.get(attrs, :asset_contract),
-      asset_token_id:      Map.get(attrs, :asset_token_id)
+      asset_token_id:      Map.get(attrs, :asset_token_id),
+      destination_zone:    Map.get(attrs, :destination_zone),
+      destination_address: Map.get(attrs, :destination_address)
     }
 
     with {:ok, _record} <- Transfers.create(transfer_attrs) do
@@ -47,6 +49,7 @@ defmodule BharatCore.Bridge.TransferSupervisor do
   defp chains_for_direction("stablecoin_to_cbdc"),   do: {"amoy", "anvil"}
   defp chains_for_direction("token_to_instruction"), do: {"anvil", "amoy"}
   defp chains_for_direction("asset_to_instruction"), do: {"anvil", "amoy"}
+  defp chains_for_direction("evm_to_solana"),        do: {"amoy", "solana_devnet"}
   defp chains_for_direction(_),                      do: {"amoy", "sepolia"}
 
   defp transfer_type_for_direction("cbdc_to_stablecoin"),   do: "token_to_token"

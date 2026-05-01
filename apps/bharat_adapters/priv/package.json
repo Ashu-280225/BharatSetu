@@ -1,0 +1,11 @@
+{
+  "name": "solana-signer",
+  "version": "1.0.0",
+  "description": "Node.js Solana tx signing for BharatSetu relayer",
+  "main": "solana_signer.js",
+  "scripts": {},
+  "dependencies": {
+    "@solana/web3.js": "^1.98.0",
+    "bn.js": "^5.2.1"
+  }
+}

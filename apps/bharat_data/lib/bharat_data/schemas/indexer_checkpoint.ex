@@ -8,13 +8,14 @@ defmodule BharatData.Schemas.IndexerCheckpoint do
   schema "indexer_checkpoints" do
     field :chain,                :string
     field :last_processed_block, :integer
+    field :last_sig,             :string
 
     timestamps(inserted_at: false)
   end
 
   def changeset(checkpoint, attrs) do
     checkpoint
-    |> cast(attrs, [:id, :chain, :last_processed_block])
-    |> validate_required([:id, :last_processed_block])
+    |> cast(attrs, [:id, :chain, :last_processed_block, :last_sig])
+    |> validate_required([:id])
   end
 end

@@ -63,6 +63,46 @@ defmodule BharatData.Transfers do
     |> Repo.all()
   end
 
+  def get_confirmed_evm_to_solana(limit \\ 50) do
+    Transfer
+    |> where([t], t.direction == "evm_to_solana" and t.state == "confirmed")
+    |> where([t], is_nil(t.solana_tx_sig))
+    |> order_by([t], asc: t.updated_at)
+    |> limit(^limit)
+    |> Repo.all()
+  end
+
+  def update_solana_released(transfer_id, solana_tx_sig, solana_slot) do
+    now = DateTime.utc_now()
+    {_n, _} =
+      Transfer
+      |> where([t], t.id == ^transfer_id)
+      |> Repo.update_all(set: [
+        state: "minted",
+        solana_tx_sig: solana_tx_sig,
+        solana_slot: solana_slot,
+        updated_at: now
+      ])
+    :ok
+  end
+
+  def confirm_evm_escrow_lock(event) do
+    transfer_id = event.transfer_id
+    case get(transfer_id) do
+      nil ->
+        {:error, :not_found}
+      transfer ->
+        attrs = %{
+          state:               "confirmed",
+          lock_block:          event[:block_number],
+          destination_address: event[:destination_address]
+        }
+        transfer
+        |> Transfer.changeset(attrs)
+        |> Repo.update()
+    end
+  end
+
   # Idempotency check: has this nonce_hash already been minted?
   def already_minted?(nonce_hash) do
     Transfer

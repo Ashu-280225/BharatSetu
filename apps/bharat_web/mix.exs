@@ -38,7 +38,8 @@ defmodule BharatWeb.MixProject do
       {:cors_plug, "~> 3.0"},
       {:bharat_core, in_umbrella: true},
       {:bharat_adapters, in_umbrella: true},
-      {:bharat_data, in_umbrella: true}
+      {:bharat_data, in_umbrella: true},
+      {:b58, "~> 1.0"}
     ]
   end
 

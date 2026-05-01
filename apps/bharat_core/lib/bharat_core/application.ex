@@ -32,6 +32,12 @@ defmodule BharatCore.Application do
       # Anvil indexer — polls CBDCLocked events for cbdc_to_stablecoin (POC v2)
       BharatCore.Indexer.AnvilIndexer,
 
+      # EVMEscrow indexer — polls TokensLockedForZone for evm_to_solana
+      BharatCore.Indexer.EVMEscrowIndexer,
+
+      # Solana indexer — polls EscrowReleased events on devnet
+      BharatCore.Indexer.SolanaIndexer,
+
       # Expires init transfers with no tx hash older than 10 min
       BharatCore.Bridge.InitTimeoutWorker,
 
