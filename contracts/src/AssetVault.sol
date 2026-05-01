@@ -21,7 +21,9 @@ contract AssetVault is Ownable {
         uint256 tokenId,
         bytes32 nonceHash,
         bytes32 transferId,
-        bytes instructionPayload
+        string  destinationZone,
+        bytes32 destinationAddress,
+        bytes   instructionPayload
     );
 
     event AssetUnlocked(
@@ -65,10 +67,11 @@ contract AssetVault is Ownable {
         address tokenContract,
         uint256 tokenId,
         bytes32 transferId,
-        bytes calldata instructionPayload
+        string  calldata destinationZone,
+        bytes32 destinationAddress,
+        bytes   calldata instructionPayload
     ) external whenNotPaused {
         if (tokenContract == address(0)) revert ZeroAddress();
-        if (instructionPayload.length == 0) revert EmptyPayload();
         if (processedTransfers[transferId]) revert TransferIdUsed(transferId);
 
         processedTransfers[transferId] = true;
@@ -82,7 +85,8 @@ contract AssetVault is Ownable {
         ));
 
         ERC721(tokenContract).transferFrom(msg.sender, address(this), tokenId);
-        emit AssetLocked(msg.sender, tokenContract, tokenId, nonceHash, transferId, instructionPayload);
+        emit AssetLocked(msg.sender, tokenContract, tokenId, nonceHash, transferId,
+                         destinationZone, destinationAddress, instructionPayload);
     }
 
     /**

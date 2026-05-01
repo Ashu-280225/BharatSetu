@@ -43,49 +43,78 @@ defmodule BharatWeb.TransferController do
   end
 
   defp do_create(conn, wallet, direction, params) do
-    {destination_zone, destination_address} =
-      if direction == "evm_to_solana" do
-        pubkey_b58 = params["destination_address"]
-        unless pubkey_b58 do
+    with {:ok, {source_zone, dest_zone, channel_id, destination_zone, destination_address}} <-
+           resolve_zones(direction, params, conn) do
+      attrs = %{
+        wallet:              wallet,
+        token_address:       params["token_address"],
+        amount:              parse_amount(params["amount"]),
+        direction:           direction,
+        compliance_status:   "approved",
+        instruction_payload: params["instruction_payload"],
+        asset_contract:      params["asset_contract"],
+        asset_token_id:      params["asset_token_id"] && String.to_integer(params["asset_token_id"]),
+        destination_zone:    destination_zone,
+        destination_address: destination_address,
+        channel_id:          channel_id,
+        source_chain:        source_zone,
+        dest_chain:          dest_zone,
+        token_version:       params["token_version"]
+      }
+
+      require Logger
+      Logger.info("[TransferController.create] wallet=#{wallet} token=#{attrs.token_address} amount=#{attrs.amount} direction=#{direction}")
+
+      case TransferSupervisor.start_transfer(attrs) do
+        {:ok, id} ->
+          Logger.info("[TransferController.create] OK id=#{id}")
           conn
-          |> put_status(:bad_request)
-          |> json(%{error: "destination_address required for evm_to_solana"})
-          |> halt()
-        end
-        {"sol:devnet", B58.decode!(pubkey_b58)}
-      else
-        {nil, nil}
+          |> put_status(:created)
+          |> json(%{data: %{id: id, state: "init"}})
+
+        {:error, reason} ->
+          Logger.error("[TransferController.create] FAILED reason=#{inspect(reason)}")
+          conn
+          |> put_status(:unprocessable_entity)
+          |> json(%{error: inspect(reason)})
       end
-
-    attrs = %{
-      wallet:              wallet,
-      token_address:       params["token_address"],
-      amount:              parse_amount(params["amount"]),
-      direction:           direction,
-      compliance_status:   "approved",
-      instruction_payload: params["instruction_payload"],
-      asset_contract:      params["asset_contract"],
-      asset_token_id:      params["asset_token_id"] && String.to_integer(params["asset_token_id"]),
-      destination_zone:    destination_zone,
-      destination_address: destination_address
-    }
-
-    require Logger
-    Logger.info("[TransferController.create] wallet=#{wallet} token=#{attrs.token_address} amount=#{attrs.amount} direction=#{direction}")
-
-    case TransferSupervisor.start_transfer(attrs) do
-      {:ok, id} ->
-        Logger.info("[TransferController.create] OK id=#{id}")
-        conn
-        |> put_status(:created)
-        |> json(%{data: %{id: id, state: "init"}})
-
-      {:error, reason} ->
-        Logger.error("[TransferController.create] FAILED reason=#{inspect(reason)}")
-        conn
-        |> put_status(:unprocessable_entity)
-        |> json(%{error: inspect(reason)})
     end
+  end
+
+  @solana_dest_directions ~w(evm_to_solana nft_evm_to_solana)
+  @evm_dest_directions    ~w(solana_to_evm nft_solana_to_evm)
+
+  defp resolve_zones(direction, params, conn) when direction in @solana_dest_directions do
+    case params["destination_address"] do
+      nil ->
+        conn
+        |> put_status(:bad_request)
+        |> json(%{error: "destination_address required for #{direction}"})
+        |> halt()
+        {:error, :halted}
+
+      pubkey_b58 ->
+        {:ok, {"evm", "solana", "evm_solana_v1", "sol:devnet", B58.decode!(pubkey_b58)}}
+    end
+  end
+
+  defp resolve_zones(direction, params, conn) when direction in @evm_dest_directions do
+    case params["destination_address"] do
+      nil ->
+        conn
+        |> put_status(:bad_request)
+        |> json(%{error: "destination_address required for #{direction}"})
+        |> halt()
+        {:error, :halted}
+
+      evm_addr ->
+        dest_bytes = Base.decode16!(String.trim_leading(evm_addr, "0x"), case: :mixed)
+        {:ok, {"solana", "evm", "evm_solana_v1", "evm:amoy", dest_bytes}}
+    end
+  end
+
+  defp resolve_zones(_direction, _params, _conn) do
+    {:ok, {nil, nil, nil, nil, nil}}
   end
 
   @cbdc_directions ~w(cbdc_to_stablecoin stablecoin_to_cbdc token_to_instruction asset_to_instruction)

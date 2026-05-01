@@ -2,8 +2,8 @@ defmodule BharatData.Schemas.Transfer do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @valid_states ~w(init locked confirmed minted completed failed)
-  @valid_directions ~w(amoy_to_sepolia sepolia_to_amoy cbdc_to_stablecoin stablecoin_to_cbdc token_to_instruction asset_to_instruction evm_to_solana)
+  @valid_states ~w(init locked confirmed minted completed failed rolled_back)
+  @valid_directions ~w(amoy_to_sepolia sepolia_to_amoy cbdc_to_stablecoin stablecoin_to_cbdc token_to_instruction asset_to_instruction evm_to_solana solana_to_evm nft_evm_to_solana nft_solana_to_evm)
   @valid_compliance_statuses ~w(approved rejected)
   @valid_transfer_types ~w(token_to_token token_to_instruction asset_to_instruction)
   @primary_key {:id, :binary_id, autogenerate: true}
@@ -33,6 +33,10 @@ defmodule BharatData.Schemas.Transfer do
     field :destination_address, :binary
     field :solana_slot,         :integer
     field :solana_tx_sig,       :string
+    field :channel_id,          :string
+    field :token_version,       :string
+    field :zone_a_committed_at, :utc_datetime_usec
+    field :zone_b_committed_at, :utc_datetime_usec
 
     timestamps()
   end
@@ -44,7 +48,8 @@ defmodule BharatData.Schemas.Transfer do
                     :transfer_type, :instruction_payload, :asset_contract, :asset_token_id,
                     :lock_tx_hash, :lock_block, :mint_tx_hash,
                     :failure_reason, :relay_attempts,
-                    :destination_zone, :destination_address, :solana_slot, :solana_tx_sig])
+                    :destination_zone, :destination_address, :solana_slot, :solana_tx_sig,
+                    :channel_id, :token_version, :zone_a_committed_at, :zone_b_committed_at])
     |> validate_required([:wallet, :token_address, :amount, :nonce_hash])
     |> validate_inclusion(:state, @valid_states)
     |> validate_inclusion(:direction, @valid_directions)

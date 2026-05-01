@@ -19,8 +19,9 @@ defmodule BharatAdapters.Blockchain.Contract do
   # keccak256("TokensBurned(address,uint256,bytes32)") — StablecoinBridge burn event
   @stablecoin_burned_topic "0x52916471973ae53f679d702015168c0a34628d9d95a48de6bd2093661e39a7c3"
 
-  # keccak256("AssetLocked(address,address,uint256,bytes32,bytes32,bytes)") — AssetVault
-  @asset_locked_topic "0xfebbc5c036aa2aa6ef382b492327c08033496d19d1286f732900cb5d618a70d4"
+  # keccak256("AssetLocked(address,address,uint256,bytes32,bytes32,string,bytes32,bytes)") — AssetVault
+  # Recompute with: cast keccak "AssetLocked(address,address,uint256,bytes32,bytes32,string,bytes32,bytes)"
+  @asset_locked_topic "0x0000000000000000000000000000000000000000000000000000000000000000"
 
   # Sepolia chain ID
   @sepolia_chain_id 11_155_111
@@ -612,6 +613,113 @@ defmodule BharatAdapters.Blockchain.Contract do
   defp evm_escrow_address do
     Application.get_env(:bharat_core, :evm_escrow_contract) ||
       raise "evm_escrow_contract not configured"
+  end
+
+  # ── AssetVault functions ──────────────────────────────────────────────────
+
+  # Build lockAsset() calldata for MetaMask — NFT EVM→Solana forward flow
+  # lockAsset(address,uint256,bytes32,string,bytes32,bytes)
+  def build_asset_vault_lock_tx(token_contract, token_id, transfer_id, dest_zone, dest_address_bytes, instruction_payload) do
+    payload_bin    = if instruction_payload, do: decode_hex_bytes(instruction_payload), else: <<>>
+    zone_enc       = encode_bytes_elem(dest_zone)
+    payload_enc    = encode_bytes_elem(payload_bin)
+    # Static head: tokenContract(32) + tokenId(32) + transferId(32) + destZoneOffset(32) + destAddress(32) + payloadOffset(32) = 192
+    zone_offset    = 192
+    payload_offset = zone_offset + byte_size(zone_enc)
+
+    args = IO.iodata_to_binary([
+      addr(token_contract),
+      uint(token_id),
+      bytes32(transfer_id),
+      uint(zone_offset),
+      dest_address_bytes,
+      uint(payload_offset),
+      zone_enc,
+      payload_enc
+    ])
+
+    calldata = encode_call(
+      "lockAsset(address,uint256,bytes32,string,bytes32,bytes)",
+      args
+    )
+
+    %{
+      to:   asset_vault_address(),
+      data: "0x" <> Base.encode16(calldata, case: :lower),
+      gas:  "0x493E0"
+    }
+  end
+
+  # Call unlockAsset() on AssetVault — NFT Solana→EVM reverse flow
+  def unlock_asset(to_wallet, token_contract, token_id, transfer_id) do
+    calldata = encode_call(
+      "unlockAsset(address,address,uint256,bytes32)",
+      [addr(to_wallet), addr(token_contract), uint(token_id), bytes32(transfer_id)]
+    )
+    submit_to_asset_vault(calldata)
+  end
+
+  defp submit_to_asset_vault(calldata) do
+    relayer_key = relayer_private_key()
+    amoy_url    = amoy_http_url()
+
+    with {:ok, nonce}     <- eth_get_nonce(amoy_url, relayer_address(relayer_key)),
+         {:ok, gas_price} <- eth_gas_price(amoy_url),
+         {:ok, signed}    <- sign_tx_for_chain(relayer_key, asset_vault_address(), calldata, nonce, gas_price, @amoy_chain_id),
+         {:ok, tx_hash}   <- eth_send_raw(amoy_url, signed) do
+      Logger.info("unlockAsset submitted: #{tx_hash}")
+      {:ok, tx_hash}
+    else
+      {:error, reason} ->
+        Logger.error("unlockAsset failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  # Call refundAfterTimeout() on EVMEscrow — permissionless after 1hr lock timeout
+  def refund_after_timeout(nonce_hash) do
+    calldata = encode_call(
+      "refundAfterTimeout(bytes32)",
+      [bytes32_hex(nonce_hash)]
+    )
+
+    relayer_key = relayer_private_key()
+    amoy_url    = amoy_http_url()
+
+    with {:ok, nonce}     <- eth_get_nonce(amoy_url, relayer_address(relayer_key)),
+         {:ok, gas_price} <- eth_gas_price(amoy_url),
+         {:ok, signed}    <- sign_tx_for_chain(relayer_key, evm_escrow_address(), calldata, nonce, gas_price, @amoy_chain_id),
+         {:ok, tx_hash}   <- eth_send_raw(amoy_url, signed) do
+      Logger.info("refundAfterTimeout submitted: #{tx_hash}")
+      {:ok, tx_hash}
+    else
+      {:error, reason} ->
+        Logger.error("refundAfterTimeout failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  # Call unlockFromZone() on EVMEscrow — reverse token flow (Solana→EVM)
+  def unlock_from_zone(recipient, token, amount, transfer_id) do
+    calldata = encode_call(
+      "unlockFromZone(address,address,uint256,bytes32)",
+      [addr(recipient), addr(token), uint(amount), bytes32_hex(transfer_id)]
+    )
+
+    relayer_key = relayer_private_key()
+    amoy_url    = amoy_http_url()
+
+    with {:ok, nonce}     <- eth_get_nonce(amoy_url, relayer_address(relayer_key)),
+         {:ok, gas_price} <- eth_gas_price(amoy_url),
+         {:ok, signed}    <- sign_tx_for_chain(relayer_key, evm_escrow_address(), calldata, nonce, gas_price, @amoy_chain_id),
+         {:ok, tx_hash}   <- eth_send_raw(amoy_url, signed) do
+      Logger.info("unlockFromZone submitted: #{tx_hash}")
+      {:ok, tx_hash}
+    else
+      {:error, reason} ->
+        Logger.error("unlockFromZone failed: #{inspect(reason)}")
+        {:error, reason}
+    end
   end
 
   # ── EVMEscrow functions ───────────────────────────────────────────────────

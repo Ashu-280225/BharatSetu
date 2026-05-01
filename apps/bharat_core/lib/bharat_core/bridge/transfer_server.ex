@@ -31,7 +31,9 @@ defmodule BharatCore.Bridge.TransferServer do
 
   defstruct [:id, :wallet, :token_address, :amount,
              :nonce_hash, :lock_tx_hash, :state, :direction, :started_at,
-             :destination_zone, :destination_address]
+             :destination_zone, :destination_address,
+             :source_zone, :dest_zone, :channel_id, :token_version,
+             :asset_contract, :asset_token_id, :instruction_payload]
 
   # ── Public API ────────────────────────────────────────────────────────────
 
@@ -85,6 +87,15 @@ defmodule BharatCore.Bridge.TransferServer do
     :ok
   end
 
+  def on_rollback(id, reason) do
+    case lookup(id) do
+      {:ok, pid} -> GenServer.cast(pid, {:rollback, reason})
+      {:error, _} ->
+        Transfers.update_state(id, "rolled_back", %{failure_reason: reason})
+    end
+    :ok
+  end
+
   # Called by BharatRelayer.Worker after successful mint
   def on_minted(id, mint_tx_hash) do
     case lookup(id) do
@@ -103,16 +114,23 @@ defmodule BharatCore.Bridge.TransferServer do
   @impl true
   def init(opts) do
     state = struct(__MODULE__,
-      id:            opts[:id],
-      wallet:        opts[:wallet],
-      token_address: opts[:token_address],
-      amount:        opts[:amount],
+      id:                  opts[:id],
+      wallet:              opts[:wallet],
+      token_address:       opts[:token_address],
+      amount:              opts[:amount],
       nonce_hash:          compute_nonce(opts[:wallet], opts[:id]),
       state:               :init,
       direction:           opts[:direction] || "amoy_to_sepolia",
       started_at:          DateTime.utc_now(),
       destination_zone:    opts[:destination_zone],
-      destination_address: opts[:destination_address]
+      destination_address: opts[:destination_address],
+      source_zone:         opts[:source_chain],
+      dest_zone:           opts[:dest_chain],
+      channel_id:          opts[:channel_id],
+      token_version:       opts[:token_version],
+      asset_contract:      opts[:asset_contract],
+      asset_token_id:      opts[:asset_token_id],
+      instruction_payload: opts[:instruction_payload]
     )
 
     {:ok, state, {:continue, :init_transfer}}
@@ -139,6 +157,25 @@ defmodule BharatCore.Bridge.TransferServer do
           )
           %{event: "await_lock", transfer_id: s.id, unsigned_tx: unsigned_tx,
             nonce_hash: s.nonce_hash, chain: "evm_escrow"}
+
+        "solana_to_evm" ->
+          # User locks/burns on Solana — frontend builds Solana instruction from this payload
+          %{event: "await_solana_lock", transfer_id: s.id, nonce_hash: s.nonce_hash,
+            token_version: s.token_version, source_zone: s.source_zone}
+
+        "nft_evm_to_solana" ->
+          unsigned_tx = Contract.build_asset_vault_lock_tx(
+            s.asset_contract, s.asset_token_id, s.id,
+            s.destination_zone, s.destination_address, s.instruction_payload
+          )
+          %{event: "await_nft_lock", transfer_id: s.id, unsigned_tx: unsigned_tx,
+            nonce_hash: s.nonce_hash}
+
+        "nft_solana_to_evm" ->
+          # User locks wrapped NFT on Solana — frontend builds Solana instruction
+          %{event: "await_solana_nft_lock", transfer_id: s.id, nonce_hash: s.nonce_hash,
+            token_version: s.token_version, asset_contract: s.asset_contract,
+            asset_token_id: s.asset_token_id}
 
         _ ->
           # sepolia_to_amoy + stablecoin_to_cbdc — user burns, no unsigned tx needed
@@ -190,6 +227,14 @@ defmodule BharatCore.Bridge.TransferServer do
     # Idempotent — relayer may resubmit; ignore if already minted
     Logger.debug("Transfer #{s.id} duplicate minted cast — ignoring")
     {:noreply, s}
+  end
+
+  def handle_cast({:rollback, reason}, s) when s.state not in [:completed, :rolled_back] do
+    s = %{s | state: :rolled_back}
+    Transfers.update_state(s.id, "rolled_back", %{failure_reason: reason})
+    broadcast(s.id, %{event: "rolled_back", state: "rolled_back", reason: reason})
+    Logger.info("Transfer #{s.id} ROLLED_BACK: #{reason}")
+    {:stop, :normal, s}
   end
 
   def handle_cast(msg, s) do

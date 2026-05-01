@@ -7,8 +7,12 @@ defmodule BharatRelayer.Application do
       # Solana port (Node.js signer) — must start before SolanaRelayWorker
       BharatAdapters.Blockchain.SolanaPortClient,
 
-      # EVM→Solana relay worker
+      # EVM→Solana relay worker (token)
       BharatRelayer.SolanaRelayWorker,
+      # Solana→EVM relay worker (reverse token flow)
+      BharatRelayer.SolanaToEvmWorker,
+      # NFT relay worker (both EVM↔Solana NFT directions)
+      BharatRelayer.NFTRelayWorker,
 
       # POC v1 — amoy↔sepolia single relayer
       BharatRelayer.Worker,

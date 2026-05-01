@@ -72,6 +72,40 @@ defmodule BharatData.Transfers do
     |> Repo.all()
   end
 
+  def get_confirmed_solana_to_evm(limit \\ 50) do
+    Transfer
+    |> where([t], t.direction == "solana_to_evm" and t.state == "confirmed")
+    |> where([t], is_nil(t.mint_tx_hash))
+    |> order_by([t], asc: t.updated_at)
+    |> limit(^limit)
+    |> Repo.all()
+  end
+
+  def get_confirmed_nft_evm_to_solana(limit \\ 50) do
+    Transfer
+    |> where([t], t.direction == "nft_evm_to_solana" and t.state == "confirmed")
+    |> where([t], is_nil(t.solana_tx_sig))
+    |> order_by([t], asc: t.updated_at)
+    |> limit(^limit)
+    |> Repo.all()
+  end
+
+  def get_confirmed_nft_solana_to_evm(limit \\ 50) do
+    Transfer
+    |> where([t], t.direction == "nft_solana_to_evm" and t.state == "confirmed")
+    |> where([t], is_nil(t.mint_tx_hash))
+    |> order_by([t], asc: t.updated_at)
+    |> limit(^limit)
+    |> Repo.all()
+  end
+
+  def get_stale_locked_transfers(cutoff_seconds \\ 1200) do
+    cutoff = DateTime.add(DateTime.utc_now(), -cutoff_seconds, :second)
+    Transfer
+    |> where([t], t.state in ["locked", "confirmed"] and t.inserted_at < ^cutoff)
+    |> Repo.all()
+  end
+
   def update_solana_released(transfer_id, solana_tx_sig, solana_slot) do
     now = DateTime.utc_now()
     {_n, _} =
