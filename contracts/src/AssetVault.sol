@@ -72,7 +72,14 @@ contract AssetVault is Ownable {
         if (processedTransfers[transferId]) revert TransferIdUsed(transferId);
 
         processedTransfers[transferId] = true;
-        bytes32 nonceHash = keccak256(abi.encodePacked(msg.sender, tokenContract, tokenId, transferId));
+        uint8 transferType = 2; // asset_to_instruction
+        bytes32 nonceHash = keccak256(abi.encodePacked(
+            block.chainid,
+            address(this),
+            transferType,
+            msg.sender,
+            transferId
+        ));
 
         ERC721(tokenContract).transferFrom(msg.sender, address(this), tokenId);
         emit AssetLocked(msg.sender, tokenContract, tokenId, nonceHash, transferId, instructionPayload);

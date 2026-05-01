@@ -16,6 +16,7 @@ defmodule BharatWeb.ConfigController do
         stablecoin_bridge:     Application.get_env(:bharat_core, :stablecoin_bridge_contract),
         mock_cbdc_token:       Application.get_env(:bharat_core, :mock_cbdc_token),
         mock_asset_contract:   Application.get_env(:bharat_core, :mock_asset_contract),
+        block_hash_oracle:     Application.get_env(:bharat_core, :block_hash_oracle_contract),
         anvil_chain_id:        31_337
       }
     })

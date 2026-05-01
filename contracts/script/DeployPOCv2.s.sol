@@ -5,6 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {MockCBDC} from "../src/MockCBDC.sol";
 import {CBDCVault} from "../src/CBDCVault.sol";
 import {StablecoinBridge} from "../src/StablecoinBridge.sol";
+import {BlockHashOracle} from "../src/BlockHashOracle.sol";
 import {MockAsset} from "../src/MockAsset.sol";
 import {AssetVault} from "../src/AssetVault.sol";
 
@@ -35,28 +36,53 @@ contract DeployCBDC is Script {
     }
 }
 
-/// Deploy StablecoinBridge on Polygon Amoy (public stablecoin chain):
-///   forge script script/DeployPOCv2.s.sol:DeployStablecoin --rpc-url amoy --broadcast
+/// Deploy BlockHashOracle on Polygon Amoy (receives source block hashes from relayers):
+///   forge script script/DeployPOCv2.s.sol:DeployOracle --rpc-url amoy --broadcast
 ///
-/// After deploy, set STABLECOIN_BRIDGE_CONTRACT in .env.
-contract DeployStablecoin is Script {
+/// After deploy, set BLOCK_HASH_ORACLE_CONTRACT in .env.
+contract DeployOracle is Script {
     function run() external {
         address r1 = vm.envAddress("RELAYER_1_ADDRESS");
         address r2 = vm.envAddress("RELAYER_2_ADDRESS");
         address r3 = vm.envAddress("RELAYER_3_ADDRESS");
 
-        address[] memory validators = new address[](3);
-        validators[0] = r1;
-        validators[1] = r2;
-        validators[2] = r3;
+        address[] memory relayers = new address[](3);
+        relayers[0] = r1;
+        relayers[1] = r2;
+        relayers[2] = r3;
 
         vm.startBroadcast();
-        StablecoinBridge bridge = new StablecoinBridge{salt: SALT}(validators, 2);
+        BlockHashOracle oracle = new BlockHashOracle{salt: SALT}(relayers, 2);
+        vm.stopBroadcast();
+
+        console.log("BlockHashOracle (Amoy):", address(oracle));
+        console.log("Relayers: R1=%s R2=%s R3=%s", r1, r2, r3);
+        console.log("Threshold: 2-of-3");
+        console.log("");
+        console.log("Add to .env:");
+        console.log("  BLOCK_HASH_ORACLE_CONTRACT=%s", address(oracle));
+    }
+}
+
+/// Deploy StablecoinBridge on Polygon Amoy (public stablecoin chain).
+/// Requires BLOCK_HASH_ORACLE_CONTRACT, CBDC_VAULT_CONTRACT, ASSET_VAULT_CONTRACT in .env.
+///   forge script script/DeployPOCv2.s.sol:DeployStablecoin --rpc-url amoy --broadcast
+///
+/// After deploy, set STABLECOIN_BRIDGE_CONTRACT in .env.
+contract DeployStablecoin is Script {
+    function run() external {
+        address oracleAddr    = vm.envAddress("BLOCK_HASH_ORACLE_CONTRACT");
+        address cbdcVault     = vm.envAddress("CBDC_VAULT_CONTRACT");
+        address assetVault    = vm.envAddress("ASSET_VAULT_CONTRACT");
+
+        vm.startBroadcast();
+        StablecoinBridge bridge = new StablecoinBridge{salt: SALT}(oracleAddr, cbdcVault, assetVault);
         vm.stopBroadcast();
 
         console.log("StablecoinBridge (Amoy):", address(bridge));
-        console.log("Validators: R1=%s R2=%s R3=%s", r1, r2, r3);
-        console.log("Threshold: 2-of-3");
+        console.log("Oracle:     ", oracleAddr);
+        console.log("CBDCVault:  ", cbdcVault);
+        console.log("AssetVault: ", assetVault);
         console.log("");
         console.log("Add to .env:");
         console.log("  STABLECOIN_BRIDGE_CONTRACT=%s", address(bridge));

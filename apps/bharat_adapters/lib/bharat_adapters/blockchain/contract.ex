@@ -236,6 +236,80 @@ defmodule BharatAdapters.Blockchain.Contract do
     end
   end
 
+  # ── POC v2 proof-based bridge: oracle + executeWithProof ─────────────────
+
+  # Submit a source chain block hash to BlockHashOracle on Amoy.
+  # Called by BlockHashReporter once per finalized Anvil block.
+  def submit_block_hash(block_number, block_hash_hex) when is_integer(block_number) do
+    block_hash_bytes = bytes32_hex(block_hash_hex)
+    calldata = encode_call(
+      "submitBlockHash(uint256,bytes32)",
+      [uint(block_number), block_hash_bytes]
+    )
+    relayer_key  = relayer_1_private_key()
+    oracle_addr  = block_hash_oracle_address()
+    amoy_url     = amoy_http_url()
+
+    with {:ok, nonce}     <- eth_get_nonce(amoy_url, relayer_address(relayer_key)),
+         {:ok, gas_price} <- eth_gas_price(amoy_url),
+         {:ok, signed}    <- sign_tx_for_chain(relayer_key, oracle_addr, calldata, nonce, gas_price, @amoy_chain_id),
+         {:ok, tx_hash}   <- eth_send_raw(amoy_url, signed) do
+      Logger.info("submitBlockHash block=#{block_number} tx=#{tx_hash}")
+      {:ok, tx_hash}
+    else
+      {:error, reason} ->
+        Logger.error("submitBlockHash failed block=#{block_number}: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  # Submit executeWithProof() on Amoy after MPT proof is built.
+  # proof_data: %{block_number, rlp_block_header, tx_index, rlp_receipt, proof_nodes, log_index}
+  # All bytes fields are raw binaries.
+  def execute_with_proof(proof_data) do
+    %{
+      block_number:     block_number,
+      rlp_block_header: rlp_header,
+      tx_index:         tx_index,
+      rlp_receipt:      rlp_receipt,
+      proof_nodes:      proof_nodes,
+      log_index:        log_index
+    } = proof_data
+
+    calldata = encode_call(
+      "executeWithProof((uint256,bytes,uint256,bytes,bytes[],uint256))",
+      encode_proof_data_args(block_number, rlp_header, tx_index, rlp_receipt, proof_nodes, log_index)
+    )
+    submit_to_bridge(calldata)
+  end
+
+  # ABI-encode ProofData struct as a tuple argument.
+  # Struct fields: (uint256 blockNumber, bytes rlpHeader, uint256 txIndex, bytes rlpReceipt, bytes[] proofNodes, uint256 logIndex)
+  # Static head = 6 slots × 32 = 192 bytes.
+  # Dynamic fields: rlpHeader (slot 1), rlpReceipt (slot 3), proofNodes (slot 4).
+  defp encode_proof_data_args(block_number, rlp_header, tx_index, rlp_receipt, proof_nodes, log_index) do
+    header_enc    = encode_bytes_elem(rlp_header)
+    receipt_enc   = encode_bytes_elem(rlp_receipt)
+    nodes_enc     = encode_bytes_array(proof_nodes)
+
+    static_size = 192  # 6 × 32
+    header_offset  = static_size
+    receipt_offset = header_offset + byte_size(header_enc)
+    nodes_offset   = receipt_offset + byte_size(receipt_enc)
+
+    IO.iodata_to_binary([
+      uint(block_number),
+      uint(header_offset),
+      uint(tx_index),
+      uint(receipt_offset),
+      uint(nodes_offset),
+      uint(log_index),
+      header_enc,
+      receipt_enc,
+      nodes_enc
+    ])
+  end
+
   # ── EIP-155 Transaction Signing ──────────────────────────────────────────
 
   defp sign_tx(private_key_hex, to, calldata, nonce, gas_price) do
@@ -514,6 +588,11 @@ defmodule BharatAdapters.Blockchain.Contract do
   defp stablecoin_bridge_address do
     Application.get_env(:bharat_core, :stablecoin_bridge_contract) ||
       raise "stablecoin_bridge_contract not configured"
+  end
+
+  defp block_hash_oracle_address do
+    Application.get_env(:bharat_core, :block_hash_oracle_contract) ||
+      raise "block_hash_oracle_contract not configured"
   end
 
   defp anvil_http_url do

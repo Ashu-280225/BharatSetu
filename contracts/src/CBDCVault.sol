@@ -102,7 +102,13 @@ contract CBDCVault is Ownable {
         if (processedTransfers[transferId]) revert TransferIdUsed(transferId);
 
         processedTransfers[transferId] = true;
-        bytes32 nonceHash = keccak256(abi.encodePacked(msg.sender, transferId));
+        bytes32 nonceHash = keccak256(abi.encodePacked(
+            block.chainid,
+            address(this),
+            transferType,
+            msg.sender,
+            transferId
+        ));
 
         if (!IERC20(cbdcToken).transferFrom(msg.sender, address(this), amount)) revert TransferFailed();
         emit CBDCLocked(msg.sender, amount, nonceHash, transferId, transferType, instructionPayload);

@@ -131,6 +131,7 @@ export type BridgeConfig = {
   stablecoin_bridge: string | null;
   mock_cbdc_token: string | null;
   mock_asset_contract: string | null;
+  block_hash_oracle: string | null;
   anvil_chain_id: number;
 };
 

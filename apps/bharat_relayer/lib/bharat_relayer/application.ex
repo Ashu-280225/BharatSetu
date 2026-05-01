@@ -6,8 +6,11 @@ defmodule BharatRelayer.Application do
     children = [
       # POC v1 — amoy↔sepolia single relayer
       BharatRelayer.Worker,
-      # POC v2 — hub-and-spoke 2-of-3 threshold relayers
-      BharatRelayer.HubRouter,
+      # POC v2 — block hash reporters (one per relayer address, threshold=2-of-3 in oracle)
+      {BharatRelayer.BlockHashReporter, name: BharatRelayer.BlockHashReporterR1},
+      {BharatRelayer.BlockHashReporter, name: BharatRelayer.BlockHashReporterR2},
+      {BharatRelayer.BlockHashReporter, name: BharatRelayer.BlockHashReporterR3},
+      # POC v2 — proof submitters (any one succeeds, others get NonceAlreadyUsed)
       BharatRelayer.V2WorkerR1,
       BharatRelayer.V2WorkerR2,
       BharatRelayer.V2WorkerR3
